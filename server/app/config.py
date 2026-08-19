@@ -1,0 +1,144 @@
+"""Конфигурация сервера. Значения берутся из .env или переменных окружения."""
+
+from pathlib import Path
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+SERVER_ROOT = Path(__file__).resolve().parent.parent
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=SERVER_ROOT / ".env", env_file_encoding="utf-8", extra="ignore"
+    )
+
+    # --- сеть ---
+    host: str = "0.0.0.0"
+    port: int = 8080
+
+    # --- аудио ---
+    # Микрофон колонки: 16 кГц достаточно для распознавания речи.
+    mic_sample_rate: int = 16_000
+    # Выход: 48 кГц — родная частота Opus и большинства музыкальных источников.
+    out_sample_rate: int = 48_000
+    frame_ms: int = 20
+    # До какой доли громкости приглушать музыку, пока говорит ассистент.
+    duck_level: float = 0.2
+    default_volume: float = 0.7
+
+    # --- активация прослушивания ---
+    # Кнопка только начинает слушать (тап, не удержание) — конец реплики
+    # определяет этот детектор тишины по амплитуде, а не отпускание кнопки.
+    # Нижняя граница громкости речи (амплитуда PCM s16le). Порог адаптивный:
+    # реальный считается от фонового шума комнаты, а это значение — пол, ниже
+    # которого речью не считаем ничего. С фиксированным порогом колонка слышала
+    # только вплотную: голос с двух метров тише и уходил в «тишину».
+    vad_threshold: int = 150
+    # Во сколько раз речь должна быть громче фона.
+    vad_speech_factor: float = 3.0
+    # Столько подряд тишины после речи считается концом реплики.
+    vad_silence_ms: int = 900
+    # Тишина короче этого времени с начала записи концом не считается —
+    # иначе вдох перед фразой сразу же её оборвёт.
+    vad_min_speech_ms: int = 200
+
+    # --- активационное слово ---
+    # Пока оно не прозвучало, звук не уходит в облако и денег не стоит.
+    # Слово ищется локально, моделью Vosk. Кнопка продолжает работать.
+    wake_word_enabled: bool = False
+    wake_word: str = "компьютер"
+    # Замерено: короткие слова притягивают созвучия («Алиса» ловится на
+    # «Ларису» и «Мелиссу»), длинные — нет. Если всё же нужно короткое,
+    # перечислите похожие слова здесь: распознавателю будет куда их деть.
+    wake_word_neighbours: list[str] = []
+    vosk_model_dir: Path = SERVER_ROOT / "models" / "vosk-ru"
+    # Сколько слушать после активации, если человек молчит.
+    wake_listen_timeout_s: float = 8.0
+
+    # --- STT ---
+    # Замерено на S905X3 (tools/bench.py): `base` — 4.6–5.0 с на фразу,
+    # `tiny` — 2.6 с, но заметно хуже слышит. Время почти не зависит от длины
+    # реплики: Whisper всегда считает окно в 30 с, и на этом процессоре сам
+    # энкодер стоит несколько секунд. Пауза после кнопки неизбежна.
+    whisper_model: str = "base"
+    whisper_device: str = "cpu"
+    whisper_compute_type: str = "int8"
+    whisper_language: str = "ru"
+    whisper_cpu_threads: int = 4
+
+    # --- TTS ---
+    piper_voice: str = "ru_RU-irina-medium"
+    models_dir: Path = SERVER_ROOT / "models"
+
+    # --- экран колонки ---
+    # Картинку для OLED рисует сервер и шлёт готовым битмапом: так на экране
+    # есть полноценная кириллица без возни со шрифтами в прошивке.
+    screen_enabled: bool = True
+    screen_width: int = 128
+    screen_height: int = 64
+    screen_font: Path = Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")
+
+    # --- LLM ---
+    anthropic_api_key: str = ""
+    # Точный ID без суффикса даты. Менять только осознанно.
+    model: str = "claude-opus-5"
+    # Голосовой диалог чувствителен к задержке, поэтому низкий effort.
+    # Мышление при этом остаётся включённым (на Opus 5 это надёжнее, чем
+    # thinking=disabled, который умеет писать вызов инструмента текстом).
+    effort: str = "low"
+    max_tokens: int = 4096
+    max_history_turns: int = 20
+
+    # --- память между переподключениями ---
+    # Текст разговора (без аудио) переживает обрыв связи и перезапуск сервера —
+    # хранится в memory_dir/<имя колонки>.json, без шифрования (домашний сервер).
+    memory_dir: Path = SERVER_ROOT / "data" / "memory"
+    memory_turns: int = 20  # реплик пользователя + примерно столько же ответов
+
+    # --- голосовой бэкенд ---
+    # "claude": Whisper → Claude с инструментами → Piper (по умолчанию, локально).
+    # "openai_realtime": спич-ту-спич без STT/TTS — платно, зато без паузы на
+    # распознавание (см. tools/bench.py) и без роботизированного Piper.
+    voice_provider: str = "claude"
+    # Распознавание и синтез можно по отдельности вынести в облако OpenAI,
+    # оставив мозги на Claude. На S905X3 это главный рычаг: локальный Whisper
+    # стоит ~5 с на фразу, а Piper звучит роботом. Нужен OPENAI_API_KEY.
+    # "local" — faster-whisper / Piper, "openai" — whisper-1 / tts-1.
+    stt_provider: str = "local"
+    tts_provider: str = "local"
+    openai_stt_model: str = "whisper-1"
+    openai_tts_model: str = "tts-1"
+    # Голоса tts-1: alloy, echo, fable, onyx, nova, shimmer.
+    openai_tts_voice: str = "nova"
+    openai_api_key: str = ""
+    openai_realtime_model: str = "gpt-realtime"
+    openai_voice: str = "marin"
+    # Realtime переотправляет весь контекст сессии на каждый ответ, поэтому
+    # входной счёт растёт с каждой репликой: разговор оплачивается заново
+    # целиком. Здесь ставится потолок — по его достижении старое отбрасывается.
+    realtime_context_tokens: int = 4000
+    # Какую долю оставлять при обрезке: 0.6 — выкинуть примерно сорок процентов
+    # самого старого, чтобы не резать на каждой следующей реплике.
+    realtime_retention_ratio: float = 0.6
+
+    # --- инструменты ---
+    default_city: str = "Москва"
+    default_latitude: float = 55.7558
+    default_longitude: float = 37.6173
+    news_feeds: list[str] = [
+        "https://lenta.ru/rss/news",
+        "https://www.vedomosti.ru/rss/news",
+    ]
+    music_dir: Path = SERVER_ROOT / "music"
+
+    @property
+    def frame_samples_out(self) -> int:
+        """Сколько сэмплов в одном исходящем фрейме."""
+        return self.out_sample_rate * self.frame_ms // 1000
+
+    @property
+    def frame_samples_mic(self) -> int:
+        return self.mic_sample_rate * self.frame_ms // 1000
+
+
+settings = Settings()

@@ -1,0 +1,20 @@
+idf_component_register(
+    SRCS
+        "main.c"
+        "wifi.c"
+        "ws_client.c"
+        "audio_in.c"
+        "audio_out.c"
+        "button.c"
+        "display.c"
+        "led.c"
+    INCLUDE_DIRS "."
+    REQUIRES
+        esp_wifi
+        esp_event
+        nvs_flash
+        esp_netif
+        driver
+        json
+        esp_websocket_client
+)

@@ -1,0 +1,90 @@
+menu "Happy Speaker"
+
+    config HAPPY_WIFI_SSID
+        string "Wi-Fi SSID"
+        default "myssid"
+
+    config HAPPY_WIFI_PASSWORD
+        string "Wi-Fi password"
+        default "mypassword"
+
+    config HAPPY_SERVER_URI
+        string "WebSocket URI сервера"
+        default "ws://192.168.1.10:8080/stream"
+        help
+            Адрес компьютера, на котором запущен сервер колонки.
+
+    config HAPPY_DEVICE_NAME
+        string "Имя колонки"
+        default "kitchen"
+        help
+            Попадает в логи сервера — удобно, когда колонок несколько.
+
+    menu "Распиновка"
+
+        comment "Значения по умолчанию — плата Xiaozhi ESP32-S3 N16R8 с OLED 0.96\""
+
+        config HAPPY_I2S_MIC_BCLK
+            int "Микрофон INMP441: SCK"
+            default 5
+
+        config HAPPY_I2S_MIC_WS
+            int "Микрофон INMP441: WS"
+            default 4
+
+        config HAPPY_I2S_MIC_DIN
+            int "Микрофон INMP441: SD"
+            default 6
+
+        config HAPPY_I2S_SPK_BCLK
+            int "Усилитель MAX98357A: BCLK"
+            default 15
+
+        config HAPPY_I2S_SPK_WS
+            int "Усилитель MAX98357A: LRC"
+            default 16
+
+        config HAPPY_I2S_SPK_DOUT
+            int "Усилитель MAX98357A: DIN"
+            default 7
+
+        config HAPPY_BUTTON_GPIO
+            int "Кнопка разговора (BOOT)"
+            default 0
+
+        config HAPPY_VOL_DOWN_GPIO
+            int "Кнопка «тише» (-1 если нет)"
+            default 39
+
+        config HAPPY_VOL_UP_GPIO
+            int "Кнопка «громче» (-1 если нет)"
+            default 40
+
+        config HAPPY_LED_GPIO
+            int "Адресный светодиод WS2812 (-1 если нет)"
+            default 48
+
+    endmenu
+
+    menu "Экран"
+
+        config HAPPY_SCREEN_ENABLED
+            bool "OLED 128x64 (SSD1306, I2C)"
+            default y
+            help
+                Картинку целиком рисует сервер и присылает готовым битмапом,
+                поэтому кириллица работает без шрифтов в прошивке.
+
+        config HAPPY_I2C_SDA
+            int "I2C SDA"
+            depends on HAPPY_SCREEN_ENABLED
+            default 41
+
+        config HAPPY_I2C_SCL
+            int "I2C SCL"
+            depends on HAPPY_SCREEN_ENABLED
+            default 42
+
+    endmenu
+
+endmenu

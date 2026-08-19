@@ -1,0 +1,32 @@
+services:
+  happy:
+    build: .
+    image: happy-speaker:latest
+    container_name: happy-speaker
+    restart: unless-stopped
+    # 8080 на хосте уже занят, поэтому наружу колонка ходит через 8090.
+    ports:
+      - "${HAPPY_PORT:-8090}:8080"
+    env_file:
+      - .env
+    volumes:
+      # Веса whisper и голос Piper переживают пересборку образа.
+      - models:/app/models
+      # Локальная фонотека — только на чтение, сервер в неё ничего не пишет.
+      - ${HAPPY_MUSIC_DIR:-./music}:/app/music:ro
+      # Текст разговоров (без аудио) — переживает пересборку и перезапуск.
+      - memory:/app/data/memory
+    # На плате 4 ГБ и с десяток соседних контейнеров: предохранитель от того,
+    # чтобы распознавание утянуло за собой Home Assistant.
+    mem_limit: 2g
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      # Первый старт качает модели и греет их в памяти — до этого «нездоров».
+      start_period: 300s
+
+volumes:
+  models:
+  memory:

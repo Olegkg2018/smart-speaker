@@ -1,0 +1,22 @@
+# Секреты и локальные настройки
+.env
+
+# Модели и музыка — большие, качаются отдельно
+server/models/*
+!server/models/.gitkeep
+server/music/*
+!server/music/.gitkeep
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+*.egg-info/
+
+# ESP-IDF
+firmware/build/
+firmware/sdkconfig
+firmware/sdkconfig.old
+firmware/managed_components/
+firmware/dependencies.lock

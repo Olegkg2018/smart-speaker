@@ -1,0 +1,6 @@
+dependencies:
+  # 5.2 нужен ради driver/i2c_master.h — на нём работает экран.
+  idf: ">=5.2"
+  espressif/esp_websocket_client: "^1.2.0"
+  # Адресный светодиод WS2812 на плате — обычным GPIO им не поуправляешь.
+  espressif/led_strip: "^2.5.5"

@@ -11,6 +11,24 @@ log = logging.getLogger(__name__)
 _HEADLINES = 3
 _TAG_RE = re.compile(r"<[^>]+>")
 
+# Вёрстка заголовка, которую синтезатор читает буквально: «(!)» превращается
+# в «скобка восклицательный знак скобка», кавычки-ёлочки дают паузы, а тире
+# посреди фразы — паузу невпопад.
+_DROP_RE = re.compile(r"\(\s*[!?]+\s*\)|[«»„“”\"]")
+_DASH_RE = re.compile(r"\s+[—–]\s+")
+_SPACE_BEFORE_PUNCT_RE = re.compile(r"\s+([,.!?])")
+_REPEAT_COMMA_RE = re.compile(r"(,\s*){2,}")
+
+
+def _clean_title(raw: str) -> str:
+    """Заголовок как его произнесёт колонка, а не как он свёрстан на сайте."""
+    title = _TAG_RE.sub(" ", raw)
+    title = _DROP_RE.sub(" ", title)
+    title = _DASH_RE.sub(", ", title)
+    title = _SPACE_BEFORE_PUNCT_RE.sub(r"\1", title)
+    title = _REPEAT_COMMA_RE.sub(", ", title)
+    return " ".join(title.split()).strip(" ,")
+
 
 async def get_news(
     feeds: list[str],
@@ -91,7 +109,7 @@ def _collect(feeds: list[str], topic: str | None) -> list[str]:
 
         found: list[str] = []
         for entry in parsed.entries:
-            title = _TAG_RE.sub("", getattr(entry, "title", "")).strip()
+            title = _clean_title(getattr(entry, "title", ""))
             if not title:
                 continue
             if needle and needle not in title.lower():

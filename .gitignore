@@ -20,3 +20,5 @@ firmware/sdkconfig
 firmware/sdkconfig.old
 firmware/managed_components/
 firmware/dependencies.lock
+# Настройки Wi-Fi и адрес сервера: у каждого свои, пароль в git не нужен.
+firmware/sdkconfig.local

@@ -46,7 +46,13 @@ class Settings(BaseSettings):
     # Пока оно не прозвучало, звук не уходит в облако и денег не стоит.
     # Слово ищется локально, моделью Vosk. Кнопка продолжает работать.
     wake_word_enabled: bool = False
-    wake_word: str = "компьютер"
+    # Фраза из двух слов надёжнее одного: одиночное слово ловится на
+    # случайных созвучиях в речи и в песнях, два подряд — почти никогда.
+    wake_word: str = "слушай компьютер"
+    # Микрофон слышит музыку, которую играет сама колонка, а эхоподавления
+    # на плате нет — распознаватель ловит слова из песни и выполняет команды,
+    # которых никто не давал. Пока играет музыка, активация только кнопкой.
+    wake_word_while_playing: bool = False
     # Замерено: короткие слова притягивают созвучия («Алиса» ловится на
     # «Ларису» и «Мелиссу»), длинные — нет. Если всё же нужно короткое,
     # перечислите похожие слова здесь: распознавателю будет куда их деть.
@@ -122,12 +128,17 @@ class Settings(BaseSettings):
     realtime_retention_ratio: float = 0.6
 
     # --- инструменты ---
-    default_city: str = "Москва"
-    default_latitude: float = 55.7558
-    default_longitude: float = 37.6173
+    default_city: str = "Кривий Ріг"
+    default_latitude: float = 47.9105
+    default_longitude: float = 33.3918
+    # Несколько лент вместо одной: сайты падают и меняют адреса, а колонка
+    # должна отвечать хоть что-то. Заголовки берутся по кругу, а не подряд
+    # из первой ленты — иначе новости всегда с одного источника.
     news_feeds: list[str] = [
-        "https://lenta.ru/rss/news",
-        "https://www.vedomosti.ru/rss/news",
+        "https://www.pravda.com.ua/rss/",
+        "https://suspilne.media/rss/all.rss",
+        "https://rss.unian.net/site/news_ukr.rss",
+        "https://www.liga.net/news/all/rss.xml",
     ]
     music_dir: Path = SERVER_ROOT / "music"
 

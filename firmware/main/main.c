@@ -1,6 +1,7 @@
 #include "app.h"
 
 #include "esp_log.h"
+#include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -45,6 +46,33 @@ static void on_button(happy_button_t button, bool pressed)
     }
 }
 
+// Сколько колонка терпит отсутствие связи, прежде чем перезагрузиться сама.
+// Клиент WebSocket переподключается сам, но иногда стек залипает так, что
+// переподключение не помогает: колонка молчит и на слово, и на кнопку, и
+// оживает только выдёргиванием питания. Перезагрузка дешевле такого молчания.
+#define WATCHDOG_TIMEOUT_MS (90 * 1000)
+#define WATCHDOG_PERIOD_MS 5000
+
+static void watchdog_task(void *arg)
+{
+    TickType_t offline_since = xTaskGetTickCount();
+
+    while (true) {
+        vTaskDelay(pdMS_TO_TICKS(WATCHDOG_PERIOD_MS));
+
+        if (happy_ws_connected()) {
+            offline_since = xTaskGetTickCount();
+            continue;
+        }
+        TickType_t offline_for = xTaskGetTickCount() - offline_since;
+        if (offline_for > pdMS_TO_TICKS(WATCHDOG_TIMEOUT_MS)) {
+            ESP_LOGE(TAG, "нет связи %d с — перезагружаюсь",
+                     (int)(offline_for * portTICK_PERIOD_MS / 1000));
+            esp_restart();
+        }
+    }
+}
+
 void app_main(void)
 {
     ESP_LOGI(TAG, "колонка «%s» запускается", CONFIG_HAPPY_DEVICE_NAME);
@@ -61,5 +89,9 @@ void app_main(void)
     happy_wifi_wait_connected();
     ESP_ERROR_CHECK(happy_ws_start());
 
-    ESP_LOGI(TAG, "готово, тапни кнопку и говори");
+    if (xTaskCreate(watchdog_task, "watchdog", 2560, NULL, 2, NULL) != pdPASS) {
+        ESP_LOGW(TAG, "сторож не запустился — зависание придётся лечить питанием");
+    }
+
+    ESP_LOGI(TAG, "готово: скажи активационную фразу или тапни кнопку");
 }

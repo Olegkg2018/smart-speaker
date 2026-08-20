@@ -37,6 +37,18 @@ _BATCH_MS = 200
 # срабатывании, поэтому в фоновом режиме его нужно освежать принудительно.
 _IDLE_RESET_S = 60.0
 
+# Грамматика узкая, и распознаватель обязан отнести услышанное к чему-то из
+# словаря: без балласта обычная речь и слова из песен притягиваются прямо к
+# активационной фразе. На замерах эти слова убрали последние ложные
+# срабатывания — «Слушай, я потом перезвоню» перестало будить колонку.
+_FILLER_WORDS = [
+    "потом", "перезвоню", "музыку", "слушает", "хорошо", "ладно", "давай",
+    "сейчас", "который", "нужно", "нужен", "новый", "стоит", "столе",
+    "целыми", "днями", "очень", "вкусный", "компот", "вишни", "минуту",
+    "спасибо", "пожалуйста", "конечно", "наверное", "просто", "может",
+    "человек", "работает", "думаю", "знаешь", "смотри", "погоди",
+]
+
 
 class WakeWordModel:
     """Модель Vosk, общая на весь сервер. Раздаёт сессиям распознаватели."""
@@ -45,11 +57,21 @@ class WakeWordModel:
         self._model_dir = model_dir
         self.wake_word = wake_word.lower().strip()
         self.sample_rate = sample_rate
+        # Фраза из двух слов («слухай компьютер») ловится куда надёжнее
+        # одиночного слова: случайное созвучие в речи или в песне совпадёт
+        # с одним словом легко, а с двумя подряд — почти никогда.
+        self.wake_parts = self.wake_word.split()
         # Созвучия в словаре дают распознавателю куда деть похожие слова,
         # иначе он тянет их к единственному known-варианту — к нашему.
-        self.grammar = json.dumps(
-            [self.wake_word, *(w.lower() for w in extra_words), "[unk]"], ensure_ascii=False
-        )
+        # В грамматику слова фразы идут по отдельности: Vosk работает
+        # словарём, а не строками.
+        vocabulary = [
+            *self.wake_parts,
+            *(w.lower() for w in extra_words),
+            *_FILLER_WORDS,
+            "[unk]",
+        ]
+        self.grammar = json.dumps(sorted(set(vocabulary)), ensure_ascii=False)
         self._model = None
         self.available = False
 
@@ -89,7 +111,7 @@ class WakeWordDetector:
 
     def __init__(self, model: WakeWordModel):
         self._model = model
-        self._wake = model.wake_word
+        self._wake_parts = model.wake_parts
         self._rec = model.new_recognizer() if model.available else None
         self.available = model.available
         self._batch = bytearray()
@@ -161,8 +183,18 @@ class WakeWordDetector:
             data = json.loads(raw)
         except json.JSONDecodeError:
             return False
-        text = data.get("partial" if partial else "text", "")
-        if self._wake in text.split():
+        words = data.get("partial" if partial else "text", "").split()
+        if _contains_sequence(words, self._wake_parts):
             self.reset()
             return True
         return False
+
+
+def _contains_sequence(words: list[str], wanted: list[str]) -> bool:
+    """Идут ли слова фразы подряд в распознанном тексте."""
+    if not wanted or len(words) < len(wanted):
+        return False
+    for i in range(len(words) - len(wanted) + 1):
+        if words[i : i + len(wanted)] == wanted:
+            return True
+    return False

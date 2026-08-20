@@ -105,3 +105,22 @@ async def test_no_reset_while_recently_refreshed(tmp_path):
     chunk = b"\x00\x00" * (_RATE * 200 // 1000)
     assert await wake.feed(chunk) is False
     assert not resets, "лишний сброс стирает половину произнесённого слова"
+
+
+def test_multiword_phrase_needs_all_words_in_order():
+    from app.wakeword import _contains_sequence
+
+    phrase = ["слушай", "компьютер"]
+    assert _contains_sequence(["слушай", "компьютер"], phrase) is True
+    assert _contains_sequence(["эй", "слушай", "компьютер", "включи"], phrase) is True
+    # Одного слова мало — ровно на этом ловились ложные срабатывания.
+    assert _contains_sequence(["компьютер"], phrase) is False
+    assert _contains_sequence(["слушай", "внимательно"], phrase) is False
+    # Порядок важен, иначе фраза вырождается в набор слов.
+    assert _contains_sequence(["компьютер", "слушай"], phrase) is False
+
+
+def test_phrase_words_go_to_grammar_separately():
+    model = WakeWordModel(Path("/tmp"), "Слушай Компьютер", _RATE, [])
+    assert model.wake_parts == ["слушай", "компьютер"]
+    assert "слушай" in model.grammar and "компьютер" in model.grammar

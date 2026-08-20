@@ -50,7 +50,9 @@ async def play_music(ctx: ToolContext, query: str) -> str:
         await source.close()
         return f"Не удалось включить «{title}» — источник не отвечает."
 
-    await ctx.mixer.set_music(PrebufferedSource(source, first_chunk))
+    # Ждём, пока ассистент договорит: иначе трек заиграет ему в спину, прямо
+    # посреди фразы «включаю такую-то песню».
+    await ctx.mixer.set_music_after_speech(PrebufferedSource(source, first_chunk))
     ctx.now_playing = title
     return f"Играет: {title}"
 

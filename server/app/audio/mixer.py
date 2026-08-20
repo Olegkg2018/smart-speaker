@@ -40,6 +40,7 @@ class AudioMixer:
         self.volume = volume
         self._duck_level = duck_level
         self._music: AudioSource | None = None
+        self._pending_music: AudioSource | None = None
         self._music_paused = False
         self._speech = bytearray()
         self._speech_lock = asyncio.Lock()
@@ -71,6 +72,26 @@ class AudioMixer:
         if old is not None:
             await old.close()
 
+    async def set_music_after_speech(self, source: AudioSource) -> None:
+        """Включить музыку, когда ассистент договорит.
+
+        Иначе трек начинается посреди фразы: ассистент ещё рассказывает,
+        что включает, а музыка уже играет ему в спину. Ждать конца речи
+        приходится в микшере — только он знает, когда буфер опустеет.
+        """
+        if not self.is_speaking:
+            await self.set_music(source)
+            return
+        old, self._pending_music = self._pending_music, source
+        if old is not None:
+            await old.close()
+
+    async def _promote_pending_music(self) -> None:
+        if self._pending_music is None or self.is_speaking:
+            return
+        source, self._pending_music = self._pending_music, None
+        await self.set_music(source)
+
     @property
     def is_playing(self) -> bool:
         return self._music is not None and not self._music_paused
@@ -86,6 +107,9 @@ class AudioMixer:
     async def next_frame(self) -> bytes:
         """Один кадр 20 мс. Всегда возвращает данные — при тишине это нули."""
         speech = await self._take_speech()
+        if speech is None:
+            # Ассистент договорил — можно отпускать отложенный трек.
+            await self._promote_pending_music()
         music = await self._take_music()
 
         # Цель ducking: пока звучит речь, музыка уходит на задний план.

@@ -39,6 +39,10 @@ log = logging.getLogger(__name__)
 # Дольше этого одна реплика не бывает — защита от залипшей кнопки.
 _MAX_UTTERANCE_S = 30
 
+# Короче этого реплика не бывает: обрывок шума после ложного пробуждения
+# модель истолкует как продолжение прошлого разговора.
+_MIN_UTTERANCE_MS = 600
+
 # Кадр звука уходит каждые 20 мс. Опоздание больше половины кадра означает,
 # что колонка досрочно доиграла буфер и слушатель услышал разрыв.
 _FRAME_LATE_S = 0.010
@@ -151,6 +155,14 @@ class Session:
             # Заодно замеряем, насколько тихо в комнате: к началу реплики
             # порог речи уже подстроен под обстановку.
             self._vad.observe_noise(pcm)
+
+            # Пока играет музыка, микрофон слышит её же — эхоподавления на
+            # плате нет. Распознаватель ловит слова из песни и колонка
+            # выполняет команды, которых никто не давал. Поэтому во время
+            # музыки активация только кнопкой.
+            if self._mixer.is_playing and not self._settings.wake_word_while_playing:
+                return
+
             # Ключевое место всей затеи: пока слово не прозвучало, звук
             # дальше этой строки не идёт — ни в облако, ни в бэкенд.
             if self._wake.available and await self._wake.feed(pcm):
@@ -271,6 +283,18 @@ class Session:
         if not self._recording:
             return
         self._recording = False
+
+        # Пустую реплику отправлять нельзя. Модель получает шум, не находит
+        # в нём команды — и отвечает по прошлому контексту: «включал музыку,
+        # хотя я не просил». Лучше молча вернуться к ожиданию.
+        speech_bytes = self._settings.mic_sample_rate * _MIN_UTTERANCE_MS // 1000 * 2
+        if not self._vad.heard_speech or self._mic_bytes < speech_bytes:
+            log.info("реплика пустая или слишком короткая — не отправляю")
+            self._wake.reset()
+            await self._voice.barge_in()
+            await self._set_idle()
+            return
+
         await self._voice.end_utterance()
 
     async def _cancel_recording(self) -> None:

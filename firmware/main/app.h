@@ -40,6 +40,9 @@ void happy_wifi_wait_connected(void);
 // --- WebSocket ---
 esp_err_t happy_ws_start(void);
 bool happy_ws_connected(void);
+// Поднять соединение заново, когда клиент застрял: он умеет молча
+// перестать переподключаться, продолжая ругаться в лог.
+void happy_ws_restart(void);
 esp_err_t happy_ws_send_mic(const uint8_t *payload, size_t len);
 esp_err_t happy_ws_send_json(const char *json);
 happy_state_t happy_ws_state(void);

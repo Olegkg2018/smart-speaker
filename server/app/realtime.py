@@ -36,6 +36,13 @@ log = logging.getLogger(__name__)
 # API принимает и отдаёт PCM16 только на этой частоте — не настраивается.
 _REALTIME_RATE = 24_000
 
+# Микрофон приходит кадрами по 20 мс, но отправлять каждый отдельным
+# сообщением в облако — полсотни запросов в секунду через интернет. Каждый
+# ждёт сети, и вся эта очередь копится прямо в цикле событий: замер показал
+# задержки до трёх секунд, из-за которых речь в колонке шла рывками.
+# Копим пятую долю секунды и отправляем разом.
+_SEND_BATCH_MS = 200
+
 def _decode_and_resample(delta: str, src_rate: int, dst_rate: int) -> bytes:
     return resample_pcm16(base64.b64decode(delta), src_rate, dst_rate)
 
@@ -87,6 +94,8 @@ class RealtimeVoice:
         self._speaking = False
         self._transcript = ""
         self._cost = CostMeter(settings.openai_realtime_model)
+        self._mic_batch = bytearray()
+        self._batch_bytes = settings.mic_sample_rate * _SEND_BATCH_MS // 1000 * 2
 
     async def start(self, history: list[Turn]) -> None:
         self._manager = self._client.realtime.connect(model=self._settings.openai_realtime_model)
@@ -124,19 +133,34 @@ class RealtimeVoice:
 
     async def begin_utterance(self) -> None:
         await self.barge_in()
+        self._mic_batch.clear()
         self._transcript = ""
 
     async def feed(self, pcm: bytes) -> None:
         if self._conn is None:
             return
-        # Кадр микрофона — всего 20 мс, пересчёт занимает десятки микросекунд.
-        # Уводить такую мелочь в поток дороже, чем посчитать на месте.
-        pcm24 = resample_pcm16(pcm, self._settings.mic_sample_rate, _REALTIME_RATE)
+        self._mic_batch.extend(pcm)
+        if len(self._mic_batch) < self._batch_bytes:
+            return
+        await self._flush_mic()
+
+    async def _flush_mic(self) -> None:
+        """Отправляет накопленный микрофон одним сообщением."""
+        if self._conn is None or not self._mic_batch:
+            return
+        batch = bytes(self._mic_batch)
+        self._mic_batch.clear()
+        # Пересчёт частоты на пачке — доли миллисекунды, в поток уводить
+        # дороже, чем посчитать на месте.
+        pcm24 = resample_pcm16(batch, self._settings.mic_sample_rate, _REALTIME_RATE)
         await self._conn.input_audio_buffer.append(audio=base64.b64encode(pcm24).decode("ascii"))
 
     async def end_utterance(self) -> None:
         if self._conn is None:
             return
+        # Хвост фразы ещё лежит в пачке — без этого пропадут последние
+        # двести миллисекунд, а там обычно конец слова.
+        await self._flush_mic()
         await self._cb.set_state(State.THINKING)
         await self._conn.input_audio_buffer.commit()
         await self._conn.response.create()
@@ -171,6 +195,16 @@ class RealtimeVoice:
         assert self._conn is not None
         try:
             async for event in self._conn:
+                # Уступаем цикл событий перед каждым сообщением. Облако шлёт
+                # звук пачками по несколько десятков кусков, и они приходят
+                # уже готовыми в буфере сокета: цикл прокручивался целиком,
+                # ни разу не отдав управление. Внутри тоже уступить негде —
+                # разбор события считает на месте, а микшер берёт свободный
+                # замок, и тот возвращает управление сразу. В это время
+                # отправщик, обязанный слать кадр каждые 20 мс, просто стоял:
+                # работы у него на миллисекунду, но очередь до него не
+                # доходила, и звук на колонке рвался с опозданием до 300 мс.
+                await asyncio.sleep(0)
                 try:
                     await self._on_event(event)
                 except Exception:
@@ -196,15 +230,12 @@ class RealtimeVoice:
             if not self._speaking:
                 self._speaking = True
                 await self._cb.set_state(State.SPEAKING)
-            # Декодирование и пересчёт частоты — чистый расчёт на numpy, и на
-            # четырёх Cortex-A55 он занимает заметное время. В цикле событий
-            # это останавливает отправку кадров колонке, и речь идёт рывками,
-            # поэтому считаем в отдельном потоке.
-            pcm48 = await asyncio.to_thread(
-                _decode_and_resample,
-                event.delta,
-                _REALTIME_RATE,
-                self._settings.out_sample_rate,
+            # Считаем на месте, а не в отдельном потоке. Замер на плате:
+            # пересчёт стомиллисекундного куска — 0.7 мс, а облако шлёт их
+            # десятками подряд, и на каждом переключении в поток и обратно
+            # уходит больше, чем на самом расчёте.
+            pcm48 = _decode_and_resample(
+                event.delta, _REALTIME_RATE, self._settings.out_sample_rate
             )
             await self._cb.push_audio(pcm48)
         elif etype == "response.output_audio_transcript.delta":

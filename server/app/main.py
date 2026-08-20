@@ -23,6 +23,11 @@ logging.basicConfig(
 )
 log = logging.getLogger("happy")
 
+# httpx печатает полный URL каждого запроса, а в адресе Telegram лежит токен
+# бота — он оказывался в логах открытым текстом. Нам эти строки не нужны:
+# свои ошибки мы логируем сами и без секретов.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
 if settings.stt_provider == "openai":
     stt = CloudSpeechToText(
         api_key=settings.openai_api_key,
@@ -68,6 +73,19 @@ screen = ScreenRenderer(
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    # Диагностика рывков звука: кадр обязан уходить каждые 20 мс, и когда
+    # он опаздывает, виноват тот, кто надолго занял цикл событий. Python
+    # умеет назвать такую корутину сам — включается переменной окружения,
+    # потому что в обычной работе это лишний шум в логе.
+    if settings.debug_slow_callbacks:
+        loop = asyncio.get_running_loop()
+        loop.set_debug(True)
+        loop.slow_callback_duration = settings.debug_slow_callback_s
+        log.warning(
+            "включён поиск медленных корутин: порог %.0f мс",
+            settings.debug_slow_callback_s * 1000,
+        )
+
     # Модели грузятся один раз на старте: делать это в первой сессии значит
     # подарить пользователю несколько секунд тишины на первый же вопрос.
     log.info("загружаю модели…")

@@ -60,12 +60,11 @@ static void handle_text(const char *data, size_t len)
     if (cJSON_IsString(type) && strcmp(type->valuestring, "state") == 0 &&
         cJSON_IsString(value)) {
         s_state = parse_state(value->valuestring);
-        // Микрофон работает почти всегда: активационное слово ищет сервер,
-        // и без непрерывного потока ему нечего слушать. Молчим только пока
-        // говорит сам ассистент — иначе он услышит собственный голос и
-        // примет его за обращение (эхоподавления на плате нет).
-        happy_audio_in_set_recording(s_state != HAPPY_STATE_SPEAKING &&
-                                     s_state != HAPPY_STATE_THINKING);
+        // В сеть звук уходит только пока сервер слушает реплику.
+        // Активационное слово ищет сама плата, поэтому непрерывный поток
+        // больше не нужен: он занимал канал, ESP32 не успевала его
+        // отдавать и рвала соединение сразу после подключения.
+        happy_audio_in_set_recording(s_state == HAPPY_STATE_LISTENING);
         // Сервер перестал говорить — доигрываем остаток и чистим буфер,
         // иначе следующая реплика начнётся с хвоста предыдущей.
         if (s_state == HAPPY_STATE_IDLE) {
@@ -102,9 +101,9 @@ static void on_ws_event(void *arg, esp_event_base_t base, int32_t id, void *even
         s_connected = true;
         s_assembly_len = 0;
         send_hello();
-        // Сразу слушаем: сервер ищет активационное слово в потоке, и ждать
-        // первого сообщения о состоянии значит проглотить обращение.
-        happy_audio_in_set_recording(true);
+        // Микрофон включит либо активационное слово, либо кнопка — слать
+        // звук до этого некуда и незачем.
+        happy_audio_in_set_recording(false);
         break;
 
     case WEBSOCKET_EVENT_DISCONNECTED:
@@ -184,7 +183,28 @@ esp_err_t happy_ws_start(void)
 
 bool happy_ws_connected(void)
 {
-    return s_connected;
+    // Спрашиваем сам клиент, а не свой флаг. Флаг ставится по событиям, а
+    // они приходят не всегда: клиент умеет застрять в состоянии «не
+    // подключён», продолжая печатать ошибки отправки и не переподключаясь.
+    // Сторож при этом считал связь живой и не вмешивался — колонка молчала
+    // до выдёргивания питания.
+    if (s_client == NULL) {
+        return false;
+    }
+    return s_connected && esp_websocket_client_is_connected(s_client);
+}
+
+void happy_ws_restart(void)
+{
+    if (s_client == NULL) {
+        return;
+    }
+    ESP_LOGW(TAG, "перезапускаю соединение");
+    s_connected = false;
+    esp_websocket_client_stop(s_client);
+    if (esp_websocket_client_start(s_client) != ESP_OK) {
+        ESP_LOGE(TAG, "не удалось перезапустить соединение");
+    }
 }
 
 happy_state_t happy_ws_state(void)

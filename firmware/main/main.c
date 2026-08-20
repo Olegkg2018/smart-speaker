@@ -73,19 +73,32 @@ static void on_wake_word(void)
 // оживает только выдёргиванием питания. Перезагрузка дешевле такого молчания.
 #define WATCHDOG_TIMEOUT_MS (90 * 1000)
 #define WATCHDOG_PERIOD_MS 5000
+// Через сколько пробовать поднять соединение, не перезагружая плату.
+#define RESTART_LINK_MS (20 * 1000)
 
 static void watchdog_task(void *arg)
 {
     TickType_t offline_since = xTaskGetTickCount();
+    bool restart_tried = false;
 
     while (true) {
         vTaskDelay(pdMS_TO_TICKS(WATCHDOG_PERIOD_MS));
 
         if (happy_ws_connected()) {
             offline_since = xTaskGetTickCount();
+            restart_tried = false;
             continue;
         }
         TickType_t offline_for = xTaskGetTickCount() - offline_since;
+
+        // Сначала пробуем поднять соединение заново: клиент часто застревает
+        // сам по себе, а перезагрузка ради этого — слишком грубо, она стирает
+        // и разговор, и прогретые буферы.
+        if (offline_for > pdMS_TO_TICKS(RESTART_LINK_MS) && !restart_tried) {
+            restart_tried = true;
+            happy_ws_restart();
+            continue;
+        }
         if (offline_for > pdMS_TO_TICKS(WATCHDOG_TIMEOUT_MS)) {
             ESP_LOGE(TAG, "нет связи %d с — перезагружаюсь",
                      (int)(offline_for * portTICK_PERIOD_MS / 1000));

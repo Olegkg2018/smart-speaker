@@ -50,6 +50,11 @@ _MIN_UTTERANCE_MS = 600
 _FRAME_LATE_S = 0.010
 _LATENCY_REPORT_S = 5.0
 
+# Насколько цикл отправки может отстать, прежде чем перестанет догонять.
+# Половина буфера колонки: меньше — теряем звук зря, больше — она всё равно
+# не примет накопленное.
+_CATCHUP_LIMIT_S = 0.150
+
 
 class Session:
     def __init__(
@@ -115,6 +120,7 @@ class Session:
         self._state = State.IDLE
         self._device = "unknown"
         self._voice_failed = False
+        self._voice_ready = False
         self._alarm_tasks: list[asyncio.Task] = []
         self._notifier: TelegramNotifier | None = None
 
@@ -261,15 +267,11 @@ class Session:
             self._settings.telegram_bot_token, self._settings.telegram_chat_id, self._device
         )
         self._notifier = notifier if notifier.enabled else None
-        try:
-            await self._voice.start(self._memory.turns)
-        except Exception:
-            # Голосовой бэкенд не поднялся (неверный ключ, нет сети, квота).
-            # Ронять из-за этого сессию нельзя: колонка уйдёт в бесконечный
-            # цикл переподключения и даже не сможет сказать, что случилось.
-            log.exception("голосовой бэкенд не запустился")
-            self._voice_failed = True
-            await self._announce("Не могу подключиться к голосовому сервису.")
+        # Подключение к облаку занимает несколько секунд, и всё это время
+        # мы не читали бы данные от колонки: у неё переполняется буфер
+        # отправки, она рвёт связь и подключается заново — по кругу, так что
+        # разговор не начинается вовсе. Поэтому поднимаем бэкенд в фоне.
+        asyncio.create_task(self._start_voice())
 
         # Будильники поднимаем в любом случае: они не зависят от того,
         # работает ли разговор — разбудить нужно даже при сбое облака.
@@ -280,6 +282,19 @@ class Session:
         with contextlib.suppress(Exception):
             await self._ws.send_json(volume_msg(self._mixer.volume))
         await self._show(f"Громкость {round(self._mixer.volume * 100)}%")
+
+    async def _start_voice(self) -> None:
+        """Поднимает голосовой бэкенд, не задерживая приём от колонки."""
+        try:
+            await self._voice.start(self._memory.turns if self._memory else [])
+            self._voice_ready = True
+        except Exception:
+            # Ключ неверный, нет сети, кончилась квота. Ронять сессию нельзя:
+            # колонка уйдёт в бесконечный цикл переподключения и даже не
+            # сможет сказать, что случилось.
+            log.exception("голосовой бэкенд не запустился")
+            self._voice_failed = True
+            await self._announce("Не могу подключиться к голосовому сервису.")
 
     def _restore_alarms(self) -> None:
         """Поднимает будильники с диска — их ставили в прошлой сессии.
@@ -344,6 +359,10 @@ class Session:
     # ---------- запись и обработка ----------
 
     async def _start_recording(self) -> None:
+        if not self._voice_ready and not self._voice_failed:
+            # Связь с облаком ещё поднимается: пара секунд после включения.
+            await self._announce("Секунду, ещё подключаюсь.")
+            return
         if self._voice_failed:
             # Слушать некому — честно говорим об этом, а не молчим в ответ.
             await self._announce("Голосовой сервис недоступен.")
@@ -416,11 +435,24 @@ class Session:
         late_frames = 0
         total_frames = 0
         worst_late = 0.0
+        # Разделяем, кто именно тормозит: подготовка кадра или отправка
+        # в сеть. Без этого «звук идёт рывками» не подсказывает, что чинить.
+        worst_mix = 0.0
+        worst_send = 0.0
         next_report = time.monotonic() + _LATENCY_REPORT_S
 
         while True:
             next_tick += period
-            await asyncio.sleep(max(0.0, next_tick - time.monotonic()))
+            delay = next_tick - time.monotonic()
+            if delay < -_CATCHUP_LIMIT_S:
+                # Отстали надолго — не навёрстываем. Иначе цикл крутится без
+                # пауз и вываливает колонке сотню кадров залпом: её буфер
+                # захлёбывается, кадры теряются, и речь рвётся сильнее, чем
+                # от самой задержки. Упущенное время просто списываем.
+                log.debug("отстали на %.0f мс, продолжаю с текущего момента", -delay * 1000)
+                next_tick = time.monotonic() + period
+                delay = period
+            await asyncio.sleep(max(0.0, delay))
 
             # Пока идёт реплика или играет музыка, поток обязан быть
             # непрерывным, даже если в микшере сейчас пусто. Иначе колонка
@@ -442,9 +474,16 @@ class Session:
                 late_frames += 1
                 worst_late = max(worst_late, late)
 
+            mix_started = time.monotonic()
             pcm = await self._mixer.next_frame()
             packet = self._spk_codec.encode(pcm)
+            send_started = time.monotonic()
             await self._ws.send_bytes(pack_audio(FRAME_SPEAKER, packet))
+            now_after = time.monotonic()
+            mix_ms = (send_started - mix_started) * 1000
+            send_ms = (now_after - send_started) * 1000
+            worst_mix = max(worst_mix, mix_ms)
+            worst_send = max(worst_send, send_ms)
 
             now = time.monotonic()
             if now >= next_report:
@@ -452,13 +491,14 @@ class Session:
                 if late_frames:
                     log.warning(
                         "звук идёт рывками: %d из %d кадров опоздали больше %.0f мс "
-                        "(худшее опоздание %.0f мс)",
+                        "(худшее опоздание %.0f мс; микшер до %.0f мс, отправка до %.0f мс)",
                         late_frames, total_frames, _FRAME_LATE_S * 1000, worst_late * 1000,
+                        worst_mix, worst_send,
                     )
                 elif total_frames:
                     log.info("звук ровный: %d кадров без опозданий", total_frames)
                 late_frames = total_frames = 0
-                worst_late = 0.0
+                worst_late = worst_mix = worst_send = 0.0
 
     # ---------- состояние ----------
 

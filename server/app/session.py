@@ -16,6 +16,7 @@ from app.audio.mixer import AudioMixer
 from app.audio.vad import SilenceDetector
 from app.config import Settings
 from app.memory import ConversationMemory
+from app.notify import TelegramNotifier
 from app.tools import alarms as alarms_tool
 from app.protocol import (
     FRAME_MIC,
@@ -115,6 +116,7 @@ class Session:
         self._device = "unknown"
         self._voice_failed = False
         self._alarm_tasks: list[asyncio.Task] = []
+        self._notifier: TelegramNotifier | None = None
 
     # ---------- жизненный цикл ----------
 
@@ -131,6 +133,10 @@ class Session:
             await self._shutdown()
 
     async def _shutdown(self) -> None:
+        if self._notifier is not None:
+            # Вопрос без ответа тоже стоит переслать, иначе он пропадёт.
+            with contextlib.suppress(Exception):
+                await self._notifier.close()
         for task in self._alarm_tasks:
             task.cancel()
         self._alarm_tasks.clear()
@@ -251,6 +257,10 @@ class Session:
         self._memory = ConversationMemory(
             self._settings.memory_dir, self._device, self._settings.memory_turns
         )
+        notifier = TelegramNotifier(
+            self._settings.telegram_bot_token, self._settings.telegram_chat_id, self._device
+        )
+        self._notifier = notifier if notifier.enabled else None
         try:
             await self._voice.start(self._memory.turns)
         except Exception:
@@ -326,6 +336,10 @@ class Session:
     async def _save_turn(self, role: str, text: str) -> None:
         if self._memory is not None:
             self._memory.append(role, text)
+        if self._notifier is not None:
+            # Пересылка не должна задерживать разговор: колонка ждёт ответа,
+            # а не доставки в мессенджер.
+            asyncio.create_task(self._notifier.on_turn(role, text))
 
     # ---------- запись и обработка ----------
 

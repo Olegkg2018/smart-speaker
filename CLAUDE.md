@@ -11,22 +11,27 @@ S905X3 (Armbian) в Docker. Разговор ведёт облачная мод�
 
 | Что | Где |
 |---|---|
-| Сервер | S905X3, `$HAPPY_HOST`, наружу `:8090` (внутри контейнера 8080) |
-| Колонка | ESP32-S3 N16R8, `<адрес колонки>`, подключена по USB к серверу |
+| Сервер | S905X3, адрес в `$HAPPY_HOST`, наружу `:8090` (внутри контейнера 8080) |
+| Колонка | ESP32-S3 N16R8, адрес выдаёт роутер, подключена по USB к серверу |
 | Serial колонки | `/dev/ttyACM0` **на плате**, не на машине разработки |
-| Wi-Fi | `<имя вашей Wi-Fi сети>`, открытая сеть |
+| Wi-Fi | задаётся в `firmware/sdkconfig` (файл в `.gitignore`) |
 
 ## Как выкатывать
 
 Сборка образа идёт на самой плате: код туда переносится, а не собирается
-локально.
+локально. Адрес платы держим в переменной, чтобы он не расходился по
+командам и не попадал в репозиторий:
+
+```bash
+export HAPPY_HOST=<адрес платы в домашней сети>
+```
 
 ```bash
 # сервер
 cd /home/oleg/happy
-tar -czf - server/app/… | ssh $HAPPY_HOST 'tar -xzf - -C /home/oleg/happy'
-ssh $HAPPY_HOST 'docker compose -f /home/oleg/happy/server/docker-compose.yml build'
-ssh $HAPPY_HOST 'docker compose -f /home/oleg/happy/server/docker-compose.yml up -d --force-recreate'
+tar -czf - server/app/… | ssh "$HAPPY_HOST" 'tar -xzf - -C /home/oleg/happy'
+ssh "$HAPPY_HOST" 'docker compose -f /home/oleg/happy/server/docker-compose.yml build'
+ssh "$HAPPY_HOST" 'docker compose -f /home/oleg/happy/server/docker-compose.yml up -d --force-recreate'
 ```
 
 Сборка занимает минуты и иногда падает по сети (таймаут pypi, IPv6 до
@@ -36,8 +41,8 @@ Docker Hub при живом IPv4) — это не ошибка кода, пом
 # прошивка: собирается на машине разработки, шьётся с платы
 source /home/oleg/esp/idf_env.sh && cd firmware && idf.py build
 cd build && tar -czf - happy_speaker.bin bootloader/bootloader.bin partition_table/partition-table.bin \
-  | ssh $HAPPY_HOST 'tar -xzf - -C /home/oleg/fw'
-ssh $HAPPY_HOST 'cd /home/oleg/fw && python3 -m esptool --chip esp32s3 --port /dev/ttyACM0 \
+  | ssh "$HAPPY_HOST" 'tar -xzf - -C /home/oleg/fw'
+ssh "$HAPPY_HOST" 'cd /home/oleg/fw && python3 -m esptool --chip esp32s3 --port /dev/ttyACM0 \
   --baud 460800 --before default-reset --after hard-reset write-flash \
   --flash-mode dio --flash-freq 80m --flash-size 16MB \
   0x0 bootloader/bootloader.bin 0x8000 partition_table/partition-table.bin 0x10000 happy_speaker.bin'

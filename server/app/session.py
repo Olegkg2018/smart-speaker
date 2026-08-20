@@ -74,6 +74,7 @@ class Session:
             volume=settings.default_volume,
         )
         self._ctx = ToolContext(settings=settings, mixer=self._mixer, speak=self._announce)
+        self._mixer.on_track_finished = self._play_next_in_queue
         callbacks = VoiceCallbacks(
             set_state=self._set_state,
             show_text=self._show,
@@ -260,6 +261,23 @@ class Session:
         with contextlib.suppress(Exception):
             await self._ws.send_json(volume_msg(self._mixer.volume))
         await self._show(f"Громкость {round(self._mixer.volume * 100)}%")
+
+    async def _play_next_in_queue(self) -> None:
+        """Трек доиграл — включаем следующий из плейлиста.
+
+        Молча: объявлять каждую песню голосом посреди музыки утомительно.
+        """
+        nxt = self._ctx.next_in_queue()
+        if nxt is None:
+            self._ctx.queue_name = None
+            return
+        from app.tools import music
+
+        log.info("плейлист «%s»: следующий трек %s", self._ctx.queue_name, nxt)
+        try:
+            await music.play_music(self._ctx, nxt)
+        except Exception:
+            log.exception("не удалось включить следующий трек плейлиста")
 
     async def _save_turn(self, role: str, text: str) -> None:
         if self._memory is not None:

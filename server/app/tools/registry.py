@@ -216,6 +216,40 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "add_current_to_playlist",
+        "description": (
+            "Добавить играющую сейчас песню в плейлист. Вызывай на «добавь "
+            "эту песню в мой плейлист», «сохрани этот трек», «мне нравится, "
+            "запомни». Название песни знать не нужно — колонка знает, что "
+            "играет. Если плейлист не назвали, используй «мой плейлист»."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "playlist": {
+                    "type": "string",
+                    "description": "Название плейлиста, например «мой плейлист».",
+                }
+            },
+            "required": ["playlist"],
+        },
+    },
+    {
+        "name": "play_playlist",
+        "description": (
+            "Включить плейлист целиком: первая песня заиграет сразу, "
+            "остальные пойдут следом сами. Вызывай на «включи мой плейлист», "
+            "«поставь мою музыку»."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "playlist": {"type": "string", "description": "Название плейлиста."}
+            },
+            "required": ["playlist"],
+        },
+    },
+    {
         "name": "which_lists",
         "description": (
             "Перечислить, какие списки вообще заведены. Вызывай на «какие у "
@@ -273,6 +307,10 @@ async def dispatch(ctx: ToolContext, name: str, args: dict[str, Any]) -> str:
                 return await lists.clear_list(ctx.settings.lists_dir, args["list_name"])
             case "which_lists":
                 return await lists.which_lists(ctx.settings.lists_dir)
+            case "add_current_to_playlist":
+                return await music.add_current_to_playlist(ctx, args["playlist"])
+            case "play_playlist":
+                return await music.play_playlist(ctx, args["playlist"])
             case _:
                 return f"Неизвестный инструмент: {name}"
     except Exception as exc:

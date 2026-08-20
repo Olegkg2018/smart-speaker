@@ -46,6 +46,9 @@ class AudioMixer:
         self._speech_lock = asyncio.Lock()
         # Текущий и целевой множитель громкости музыки (ducking).
         self._gain = 1.0
+        # Кого позвать, когда трек доиграл: сюда сессия вешает переход
+        # к следующему пункту плейлиста.
+        self.on_track_finished = None
         self._ramp_step = (1.0 - duck_level) / max(1, _RAMP_MS // frame_ms)
 
     # ---------- речь ассистента ----------
@@ -144,6 +147,10 @@ class AudioMixer:
         samples = await self._music.read(self.frame_samples)
         if samples is None:
             await self.set_music(None)
+            # Трек кончился — спрашиваем, есть ли продолжение. Плейлист
+            # человек включает один раз и ждёт, что дальше пойдёт само.
+            if self.on_track_finished is not None:
+                asyncio.create_task(self.on_track_finished())
             return None
         return samples
 

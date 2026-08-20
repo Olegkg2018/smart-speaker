@@ -103,3 +103,15 @@ async def test_broken_file_does_not_crash(tmp_path):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("не json", encoding="utf-8")
     assert "пуст" in (await lists.read_list(tmp_path, "покупки")).lower()
+
+
+async def test_load_items_returns_raw_list(tmp_path):
+    """Плейлист проигрывает пункты по очереди, а не зачитывает вслух."""
+    await lists.add_to_list(tmp_path, "мой плейлист", "Кино — Группа крови")
+    await lists.add_to_list(tmp_path, "мой плейлист", "Пикник — Иероглиф")
+    items = lists.load_items(tmp_path, "мой плейлист")
+    assert items == ["Кино — Группа крови", "Пикник — Иероглиф"]
+
+
+def test_load_items_on_missing_list(tmp_path):
+    assert lists.load_items(tmp_path, "нет такого") == []

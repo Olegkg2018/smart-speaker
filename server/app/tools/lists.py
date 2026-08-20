@@ -63,6 +63,12 @@ def _speak_items(items: list[str]) -> str:
     return body
 
 
+def load_items(lists_dir: Path, list_name: str) -> list[str]:
+    """Содержимое списка как есть. Нужно тем, кто не зачитывает его вслух —
+    например плейлисту, который проигрывает пункты по очереди."""
+    return _load(_list_path(lists_dir, list_name))
+
+
 async def add_to_list(lists_dir: Path, list_name: str, item: str) -> str:
     item = item.strip()
     if not item:

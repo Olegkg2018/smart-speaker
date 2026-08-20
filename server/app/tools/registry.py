@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from app.tools import music, news, timers, weather
+from app.tools import lists, music, news, timers, weather
 from app.tools.context import ToolContext
 
 log = logging.getLogger(__name__)
@@ -147,6 +147,82 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "description": "Отменить все активные таймеры.",
         "input_schema": {"type": "object", "properties": {}, "required": []},
     },
+    {
+        "name": "add_to_list",
+        "description": (
+            "Добавить пункт в список: покупки, дела, идеи — любой. Вызывай на "
+            "«добавь молоко в покупки», «запиши в список дел позвонить маме», "
+            "«не забыть купить хлеб». Список создаётся сам, спрашивать "
+            "разрешения не нужно. Если человек не назвал список, а речь про "
+            "продукты — это «покупки»."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "list_name": {
+                    "type": "string",
+                    "description": "Название списка: покупки, дела, идеи.",
+                },
+                "item": {
+                    "type": "string",
+                    "description": "Что добавить, как сказал человек: «молоко», «позвонить маме».",
+                },
+            },
+            "required": ["list_name", "item"],
+        },
+    },
+    {
+        "name": "read_list",
+        "description": (
+            "Прочитать список вслух. Вызывай на «что в списке покупок», "
+            "«что мне нужно купить», «какие у меня дела». Не пересказывай "
+            "результат — он уже готов к произнесению."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "list_name": {"type": "string", "description": "Название списка."}
+            },
+            "required": ["list_name"],
+        },
+    },
+    {
+        "name": "remove_from_list",
+        "description": (
+            "Убрать один пункт из списка. Вызывай на «убери молоко из "
+            "покупок», «вычеркни хлеб», «купил молоко»."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "list_name": {"type": "string", "description": "Название списка."},
+                "item": {"type": "string", "description": "Что убрать."},
+            },
+            "required": ["list_name", "item"],
+        },
+    },
+    {
+        "name": "clear_list",
+        "description": (
+            "Очистить список целиком. Вызывай на «очисти список покупок», "
+            "«всё купил». В отличие от remove_from_list убирает сразу всё."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "list_name": {"type": "string", "description": "Название списка."}
+            },
+            "required": ["list_name"],
+        },
+    },
+    {
+        "name": "which_lists",
+        "description": (
+            "Перечислить, какие списки вообще заведены. Вызывай на «какие у "
+            "меня списки», «что я записывал»."
+        ),
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
 ]
 
 
@@ -183,6 +259,20 @@ async def dispatch(ctx: ToolContext, name: str, args: dict[str, Any]) -> str:
                 return await timers.set_timer(ctx, int(args["seconds"]), args.get("label"))
             case "cancel_timers":
                 return await timers.cancel_timers(ctx)
+            case "add_to_list":
+                return await lists.add_to_list(
+                    ctx.settings.lists_dir, args["list_name"], args["item"]
+                )
+            case "read_list":
+                return await lists.read_list(ctx.settings.lists_dir, args["list_name"])
+            case "remove_from_list":
+                return await lists.remove_from_list(
+                    ctx.settings.lists_dir, args["list_name"], args["item"]
+                )
+            case "clear_list":
+                return await lists.clear_list(ctx.settings.lists_dir, args["list_name"])
+            case "which_lists":
+                return await lists.which_lists(ctx.settings.lists_dir)
             case _:
                 return f"Неизвестный инструмент: {name}"
     except Exception as exc:

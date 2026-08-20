@@ -47,6 +47,9 @@ happy_state_t happy_ws_state(void);
 // --- аудио ---
 esp_err_t happy_audio_in_start(void);
 void happy_audio_in_set_recording(bool recording);
+// Микрофон слушает всегда — ради активационного слова. Этот флаг говорит
+// лишь о том, уходит ли звук на сервер.
+bool happy_audio_in_is_recording(void);
 esp_err_t happy_audio_out_start(void);
 // Вызывается из обработчика WebSocket: кладёт полученный кадр в буфер вывода.
 void happy_audio_out_push(const uint8_t *pcm, size_t len);
@@ -63,12 +66,17 @@ size_t happy_audio_out_take_reference(int16_t *dst, size_t samples);
 // автоусиление: без него слышно только вплотную. Если поднять не удалось,
 // звук идёт дальше необработанным — колонка продолжает работать.
 typedef void (*happy_frontend_cb_t)(const int16_t *pcm, size_t samples);
-esp_err_t happy_frontend_start(void);
+// Активационное слово услышано — колонка сама начинает разговор.
+typedef void (*happy_wake_cb_t)(void);
+esp_err_t happy_frontend_start(happy_frontend_cb_t on_clean, happy_wake_cb_t on_wake);
 void happy_frontend_stop(void);
 bool happy_frontend_available(void);
+// Пока колонка говорит или играет музыку, слово лучше не слушать: даже с
+// эхоподавлением остаётся риск услышать себя.
+void happy_frontend_set_wake_enabled(bool enabled);
 // Кадры на входе и выходе разной длины: обработчик копит их до своего
-// размера, поэтому колбэк может не вызваться ни разу или вызваться дважды.
-void happy_frontend_process(const int16_t *mic, size_t samples, happy_frontend_cb_t on_clean);
+// размера, а результат отдаёт колбэком из своей задачи.
+void happy_frontend_process(const int16_t *mic, size_t samples);
 
 // --- экран ---
 // Картинку целиком рисует сервер; прошивка только выводит готовый битмап.

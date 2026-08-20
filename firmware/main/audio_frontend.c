@@ -2,149 +2,169 @@
 
 #include <string.h>
 
-#include "esp_afe_aec.h"
-#include "esp_agc.h"
+#include "esp_afe_config.h"
+#include "esp_afe_sr_iface.h"
+#include "esp_afe_sr_models.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_process_sdkconfig.h"
+#include "model_path.h"
 
 static const char *TAG = "frontend";
 
-// Эхоподавитель сравнивает микрофон с тем, что колонка играет сама, и
-// вычитает совпадающее. Без него микрофон слышит собственный динамик:
-// колонка выполняла команды из играющей песни и не могла слушать во время
-// своего ответа. «MR» — один канал микрофона и один опорный, ровно наша
-// схема INMP441 плюс MAX98357A.
-#define AEC_FORMAT "MR"
-// Длина фильтра в кадрах по 16 мс. Четыре — это примерно 64 мс эха: с
-// запасом на путь «динамик — стены комнаты — микрофон», но без лишней
-// нагрузки на процессор.
-#define AEC_FILTER_LENGTH 4
+// Звуковой фронтенд Espressif делает разом три вещи, каждая из которых
+// раньше была отдельной болью:
+//
+//   эхоподавление — микрофон перестаёт слышать собственный динамик, из-за
+//     которого колонка выполняла команды из играющей песни;
+//   автоусиление — далёкий голос слышно так же, как вплотную;
+//   активационное слово — ищется прямо здесь, а не на сервере, поэтому в
+//     Wi-Fi больше не течёт круглосуточный поток и плата не занята Vosk.
+//
+// «MR» — один канал микрофона и один опорный: наша схема INMP441 плюс
+// MAX98357A. Опорный сигнал берётся из audio_out.
+#define AFE_FORMAT "MR"
 
-// WebRTC AGC принимает строго кадры по 10 мс.
-#define AGC_FRAME_SAMPLES (HAPPY_MIC_SAMPLE_RATE / 100)
-// Целевой уровень громкости, дБ ниже максимума. Ближе к нулю — громче, но
-// растёт риск перегрузки на близком голосе.
-#define AGC_TARGET_DBFS 3
-#define AGC_GAIN_DB 12
-
-static afe_aec_handle_t *s_aec;
-static void *s_agc;
-static int s_chunk;             // сколько сэмплов за раз ждёт эхоподавитель
+static const esp_afe_sr_iface_t *s_afe;
+static esp_afe_sr_data_t *s_data;
+static srmodel_list_t *s_models;
+static int s_feed_chunk;        // сколько сэмплов за раз ждёт фронтенд
 static int16_t *s_interleaved;  // [мик, опорный, мик, опорный, …]
-static int16_t *s_clean;        // выход эхоподавителя
-static int16_t *s_pending;      // микрофон, не набравший полный chunk
+static int16_t *s_pending;      // микрофон, не набравший полный кадр
 static size_t s_pending_len;
+static happy_wake_cb_t s_on_wake;
+static happy_frontend_cb_t s_on_clean;
+static volatile bool s_wake_enabled = true;
 
 bool happy_frontend_available(void)
 {
-    return s_aec != NULL;
+    return s_data != NULL;
 }
 
-esp_err_t happy_frontend_start(void)
+void happy_frontend_set_wake_enabled(bool enabled)
 {
-    s_aec = afe_aec_create(AEC_FORMAT, AEC_FILTER_LENGTH, AFE_TYPE_FD, AFE_MODE_HIGH_PERF);
-    if (s_aec == NULL) {
-        // Колонка обязана работать и без эхоподавления — просто будет
-        // слышать саму себя, как раньше.
-        ESP_LOGW(TAG, "эхоподавитель не поднялся — работаю без него");
+    s_wake_enabled = enabled;
+}
+
+// Забирает обработанный звук. Отдельная задача — так требует сам фронтенд:
+// feed кормит его входом, fetch забирает результат, и смешивать нельзя.
+static void fetch_task(void *arg)
+{
+    while (true) {
+        afe_fetch_result_t *res = s_afe->fetch(s_data);
+        if (res == NULL || res->ret_value == ESP_FAIL) {
+            continue;
+        }
+        if (res->wakeup_state == WAKENET_DETECTED && s_wake_enabled && s_on_wake != NULL) {
+            ESP_LOGI(TAG, "услышал активационное слово");
+            s_on_wake();
+        }
+        if (s_on_clean != NULL && res->data != NULL && res->data_size > 0) {
+            s_on_clean(res->data, res->data_size / sizeof(int16_t));
+        }
+    }
+}
+
+esp_err_t happy_frontend_start(happy_frontend_cb_t on_clean, happy_wake_cb_t on_wake)
+{
+    s_on_clean = on_clean;
+    s_on_wake = on_wake;
+
+    s_models = esp_srmodel_init("model");
+    afe_config_t *cfg = afe_config_init(AFE_FORMAT, s_models, AFE_TYPE_SR, AFE_MODE_HIGH_PERF);
+    if (cfg == NULL) {
+        ESP_LOGW(TAG, "фронтенд не настроился — работаю без обработки звука");
+        return ESP_OK;
+    }
+    // Всё это ради одного: колонка должна слышать человека, а не себя.
+    cfg->aec_init = true;   // вычесть собственный динамик
+    cfg->agc_init = true;   // подтянуть далёкий голос
+    cfg->se_init = true;    // подавить шум
+    cfg->vad_init = false;  // конец реплики определяет сервер, ему виднее
+
+    s_afe = esp_afe_handle_from_config(cfg);
+    s_data = s_afe->create_from_config(cfg);
+    if (s_data == NULL) {
+        ESP_LOGW(TAG, "фронтенд не поднялся — работаю без обработки звука");
         return ESP_OK;
     }
 
-    s_chunk = afe_aec_get_chunksize(s_aec);
-    // Буферы просим в PSRAM: на внутреннюю память и без того тесно, а
-    // выравнивание нужно самому эхоподавителю.
-    s_interleaved = heap_caps_aligned_alloc(16, s_chunk * 2 * sizeof(int16_t),
+    s_feed_chunk = s_afe->get_feed_chunksize(s_data);
+    int channels = s_afe->get_channel_num(s_data);
+    // Буферы в PSRAM: внутренней памяти и без того впритык.
+    s_interleaved = heap_caps_aligned_alloc(16, s_feed_chunk * 2 * sizeof(int16_t),
                                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    s_clean = heap_caps_aligned_alloc(16, s_chunk * sizeof(int16_t),
-                                      MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    s_pending = heap_caps_aligned_alloc(16, s_chunk * sizeof(int16_t),
+    s_pending = heap_caps_aligned_alloc(16, s_feed_chunk * sizeof(int16_t),
                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (s_interleaved == NULL || s_clean == NULL || s_pending == NULL) {
-        ESP_LOGW(TAG, "не хватило памяти на эхоподавление — работаю без него");
+    if (s_interleaved == NULL || s_pending == NULL) {
+        ESP_LOGW(TAG, "не хватило памяти на обработку звука");
         happy_frontend_stop();
         return ESP_OK;
     }
 
-    // AGC_MODE_2 — цифровая регулировка: подтягивает тихий далёкий голос и
-    // придерживает слишком громкий вблизи. Именно из-за его отсутствия
-    // колонка слышала только вплотную к микрофону.
-    s_agc = esp_agc_open(AGC_MODE_2, HAPPY_MIC_SAMPLE_RATE);
-    if (s_agc != NULL) {
-        set_agc_config(s_agc, AGC_GAIN_DB, 1, AGC_TARGET_DBFS);
-    } else {
-        ESP_LOGW(TAG, "автоусиление не поднялось — громкость останется как есть");
+    if (xTaskCreate(fetch_task, "afe_fetch", 4096, NULL, 5, NULL) != pdPASS) {
+        ESP_LOGW(TAG, "не запустилась задача разбора звука");
+        happy_frontend_stop();
+        return ESP_OK;
     }
 
-    ESP_LOGI(TAG, "эхоподавление и автоусиление включены (кадр %d сэмплов)", s_chunk);
+    char *wake = esp_srmodel_filter(s_models, ESP_WN_PREFIX, NULL);
+    ESP_LOGI(TAG, "звук обрабатывается на плате: кадр %d сэмплов, каналов %d, слово «%s»",
+             s_feed_chunk, channels, wake ? wake : "нет");
     return ESP_OK;
 }
 
 void happy_frontend_stop(void)
 {
-    if (s_aec != NULL) {
-        afe_aec_destroy(s_aec);
-        s_aec = NULL;
-    }
-    if (s_agc != NULL) {
-        esp_agc_close(s_agc);
-        s_agc = NULL;
+    if (s_data != NULL && s_afe != NULL) {
+        s_afe->destroy(s_data);
+        s_data = NULL;
     }
     heap_caps_free(s_interleaved);
-    heap_caps_free(s_clean);
     heap_caps_free(s_pending);
-    s_interleaved = s_clean = s_pending = NULL;
+    s_interleaved = s_pending = NULL;
     s_pending_len = 0;
 }
 
-static void apply_agc(int16_t *pcm, size_t samples)
+void happy_frontend_process(const int16_t *mic, size_t samples)
 {
-    if (s_agc == NULL) {
-        return;
-    }
-    // Кадр эхоподавителя обычно кратен десяти миллисекундам, но хвост
-    // короче кадра AGC оставляем как есть: усиливать его отдельно нельзя,
-    // а терять — значит рвать речь.
-    for (size_t i = 0; i + AGC_FRAME_SAMPLES <= samples; i += AGC_FRAME_SAMPLES) {
-        esp_agc_process(s_agc, pcm + i, pcm + i, AGC_FRAME_SAMPLES, HAPPY_MIC_SAMPLE_RATE);
-    }
-}
-
-void happy_frontend_process(const int16_t *mic, size_t samples, happy_frontend_cb_t on_clean)
-{
-    if (s_aec == NULL) {
-        on_clean(mic, samples);  // без эхоподавления отдаём как есть
+    if (s_data == NULL) {
+        // Без фронтенда отдаём звук как есть: колонка обязана работать
+        // и с необработанным микрофоном, просто хуже.
+        if (s_on_clean != NULL) {
+            s_on_clean(mic, samples);
+        }
         return;
     }
 
     while (samples > 0) {
-        size_t need = s_chunk - s_pending_len;
+        size_t need = s_feed_chunk - s_pending_len;
         size_t take = samples < need ? samples : need;
         memcpy(s_pending + s_pending_len, mic, take * sizeof(int16_t));
         s_pending_len += take;
         mic += take;
         samples -= take;
 
-        if (s_pending_len < (size_t)s_chunk) {
-            return;  // ждём, пока наберётся полный кадр
+        if (s_pending_len < (size_t)s_feed_chunk) {
+            return;  // ждём полный кадр
         }
 
-        // Опорный сигнал берём столько, сколько накопилось: если колонка
-        // молчит, его нет вовсе — тогда вычитать нечего и подставляем тишину.
-        static int16_t ref[512];
+        // Опорный сигнал: то, что колонка играет прямо сейчас. Если она
+        // молчит, его нет — тогда вычитать нечего, подставляем тишину.
+        static int16_t ref[1024];
         size_t ref_len = 0;
-        if ((size_t)s_chunk <= sizeof(ref) / sizeof(ref[0])) {
-            ref_len = happy_audio_out_take_reference(ref, s_chunk);
+        if ((size_t)s_feed_chunk <= sizeof(ref) / sizeof(ref[0])) {
+            ref_len = happy_audio_out_take_reference(ref, s_feed_chunk);
+            memset(ref + ref_len, 0, (s_feed_chunk - ref_len) * sizeof(int16_t));
+        } else {
+            memset(ref, 0, sizeof(ref));
         }
-        memset(ref + ref_len, 0, (s_chunk - ref_len) * sizeof(int16_t));
 
-        for (int i = 0; i < s_chunk; i++) {
+        for (int i = 0; i < s_feed_chunk; i++) {
             s_interleaved[i * 2] = s_pending[i];
             s_interleaved[i * 2 + 1] = ref[i];
         }
         s_pending_len = 0;
-
-        afe_aec_process(s_aec, s_interleaved, s_clean);
-        apply_agc(s_clean, s_chunk);
-        on_clean(s_clean, s_chunk);
+        s_afe->feed(s_data, s_interleaved);
     }
 }

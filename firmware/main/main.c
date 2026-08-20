@@ -46,6 +46,27 @@ static void on_button(happy_button_t button, bool pressed)
     }
 }
 
+static void send_mic_frame(const int16_t *pcm, size_t samples)
+{
+    // Микрофон слушает непрерывно ради активационного слова, но в сеть
+    // звук уходит только во время реплики: круглосуточный поток забивал
+    // Wi-Fi и заставлял сервер считать то, что ему не нужно.
+    if (happy_audio_in_is_recording()) {
+        happy_ws_send_mic((const uint8_t *)pcm, samples * sizeof(int16_t));
+    }
+}
+
+static void on_wake_word(void)
+{
+    if (!happy_ws_connected()) {
+        return;
+    }
+    // Для сервера это то же самое, что тап по кнопке: он сам решит,
+    // начать слушать или прервать текущий ответ.
+    happy_ws_send_json("{\"t\":\"ptt\",\"state\":\"down\"}");
+    happy_audio_in_set_recording(true);
+}
+
 // Сколько колонка терпит отсутствие связи, прежде чем перезагрузиться сама.
 // Клиент WebSocket переподключается сам, но иногда стек залипает так, что
 // переподключение не помогает: колонка молчит и на слово, и на кнопку, и
@@ -83,7 +104,7 @@ void app_main(void)
     ESP_ERROR_CHECK(happy_display_start());
     ESP_ERROR_CHECK(happy_audio_out_start());
     // Обработку поднимаем до микрофона: он сразу начнёт гнать через неё звук.
-    ESP_ERROR_CHECK(happy_frontend_start());
+    ESP_ERROR_CHECK(happy_frontend_start(send_mic_frame, on_wake_word));
     ESP_ERROR_CHECK(happy_audio_in_start());
     ESP_ERROR_CHECK(happy_button_start(on_button));
 

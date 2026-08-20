@@ -1,6 +1,17 @@
 # ESP32-S3 N16R8: 16 МБ флеша, 8 МБ PSRAM в octal-режиме.
 CONFIG_IDF_TARGET="esp32s3"
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+
+# Своя разметка флеша: стандартная даёт приложению 1 МБ, а с эхоподавлением
+# и активационным словом оно туда не помещается. Плюс ESP-SR требует
+# отдельный раздел model для своих моделей.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# Активационное слово ищет сам ESP32: сервер перестаёт круглосуточно
+# принимать поток по Wi-Fi и считать распознавание. Английское слово
+# надёжнее русского — модель обучена именно на нём.
+CONFIG_SR_WN_WN9_COMPUTER_TTS=y
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_OCT=y
 CONFIG_SPIRAM_SPEED_80M=y

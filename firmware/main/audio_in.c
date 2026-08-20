@@ -46,11 +46,6 @@ static esp_err_t init_i2s(void)
     return i2s_channel_enable(s_rx);
 }
 
-static void send_clean(const int16_t *pcm, size_t samples)
-{
-    happy_ws_send_mic((const uint8_t *)pcm, samples * sizeof(int16_t));
-}
-
 static void mic_task(void *arg)
 {
     static int32_t raw[HAPPY_MIC_FRAME_SAMPLES];
@@ -62,11 +57,9 @@ static void mic_task(void *arg)
         if (err != ESP_OK || read == 0) {
             continue;
         }
-        // Читаем всегда, даже с отпущенной кнопкой: так DMA не переполняется
-        // и первый кадр после нажатия не оказывается мусорным.
-        if (!s_recording) {
-            continue;
-        }
+        // Обрабатываем всегда, даже когда не пишем: активационное слово
+        // ищется здесь же, и без постоянного потока его не услышать.
+        // Отправкой на сервер занимается колбэк — он и смотрит на s_recording.
 
         const size_t samples = read / sizeof(int32_t);
         for (size_t i = 0; i < samples; i++) {
@@ -78,7 +71,7 @@ static void mic_task(void *arg)
         // Эхоподавитель вычитает то, что играет сама колонка, автоусиление
         // подтягивает далёкий голос. Кадры у него своей длины, поэтому
         // отправкой занимается колбэк, а не этот цикл.
-        happy_frontend_process(pcm, samples, send_clean);
+        happy_frontend_process(pcm, samples);
     }
 }
 
@@ -95,4 +88,9 @@ esp_err_t happy_audio_in_start(void)
 void happy_audio_in_set_recording(bool recording)
 {
     s_recording = recording;
+}
+
+bool happy_audio_in_is_recording(void)
+{
+    return s_recording;
 }

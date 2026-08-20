@@ -174,7 +174,11 @@ async def dispatch(ctx: ToolContext, name: str, args: dict[str, Any]) -> str:
                     args.get("period", "now"),
                 )
             case "get_news":
-                return await news.get_news(ctx.settings.news_feeds, args.get("topic"))
+                return await news.get_news(
+                    ctx.settings.news_feeds,
+                    args.get("topic"),
+                    ctx.settings.news_telegram_channels,
+                )
             case "set_timer":
                 return await timers.set_timer(ctx, int(args["seconds"]), args.get("label"))
             case "cancel_timers":

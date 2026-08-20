@@ -140,6 +140,9 @@ class Settings(BaseSettings):
         "https://rss.unian.net/site/news_ukr.rss",
         "https://www.liga.net/news/all/rss.xml",
     ]
+    # Публичные Telegram-каналы: читаются через веб-превью, без API и токенов.
+    # Идут наравне с лентами СМИ — местные новости часто есть только здесь.
+    news_telegram_channels: list[str] = ["insiderUKR", "hyevuy_k_r"]
     music_dir: Path = SERVER_ROOT / "music"
 
     @property

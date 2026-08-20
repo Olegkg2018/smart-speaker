@@ -52,3 +52,10 @@ def test_invisible_emoji_leftovers_are_stripped():
     text = _clean("⚡️ Нанесены удары по НПЗ в Нижнекамске")
     assert text.startswith("Нанесены"), repr(text)
     assert "️" not in text
+
+
+def test_telegram_posts_get_same_typography_cleanup_as_feeds():
+    """Заголовок из канала звучит вслух так же, как из ленты СМИ."""
+    text = _clean("В Киеве повреждён каждый третий (!) дом , — Кличко")
+    assert "(" not in text and ",," not in text
+    assert text.startswith("В Киеве")

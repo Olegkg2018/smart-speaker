@@ -91,5 +91,9 @@ def _clean(raw: str) -> str:
             cut = line[:_HEADLINE_MAX_CHARS]
             end = max(cut.rfind("."), cut.rfind("!"), cut.rfind("?"))
             line = cut[: end + 1] if end > 60 else cut.rsplit(" ", 1)[0] + "…"
-        return line
+        # Та же чистка вёрстки, что и для лент СМИ: «(!)» синтезатор
+        # читает как «скобка восклицательный знак скобка».
+        from app.tools.news import _clean_title
+
+        return _clean_title(line)
     return ""

@@ -165,7 +165,11 @@ async def resolve_track(query: str, music_dir: Path) -> tuple[str, str] | None:
 
     Возвращает (url_или_путь, человекочитаемое название) либо None.
     """
-    local = _search_local(query, music_dir)
+    # Обход каталога — синхронный ввод-вывод. На холодном чтении диска (плата
+    # молчала — правило то же, что у Vosk и numpy) он занимал цикл событий
+    # почти на секунду, и ровно в этот момент рвался звук уже играющей
+    # реплики: единственный поток события не пускал отправщика кадров.
+    local = await asyncio.to_thread(_search_local, query, music_dir)
     if local is not None:
         return str(local), local.stem
     return await _search_online(query)

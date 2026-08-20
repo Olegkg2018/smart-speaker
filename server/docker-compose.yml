@@ -9,6 +9,11 @@ services:
       - "${HAPPY_PORT:-8090}:8080"
     env_file:
       - .env
+    environment:
+      # Без этого контейнер живёт по UTC, и «разбуди завтра в шесть»
+      # срабатывает на несколько часов позже — молча и ровно один раз,
+      # когда это уже неважно.
+      TZ: ${HAPPY_TZ:-Europe/Kyiv}
     volumes:
       # Веса whisper и голос Piper переживают пересборку образа.
       - models:/app/models

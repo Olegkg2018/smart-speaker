@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from app.tools import lists, music, news, timers, weather
+from app.tools import alarms, lists, music, news, timers, weather
 from app.tools.context import ToolContext
 
 log = logging.getLogger(__name__)
@@ -229,6 +229,54 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "set_alarm",
+        "description": (
+            "Будильник или напоминание на конкретное время: «разбуди завтра "
+            "в шесть», «напомни в семь тридцать». Отличается от set_timer "
+            "тем, что время абсолютное, а не «через сколько», и будильник "
+            "переживает перезапуск — на утро ставить нужно именно его.\n"
+            "Можно будить звуком: если человек сказал «разбуди шумом дождя» "
+            "или «под музыку», передай это в sound."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "when": {
+                    "type": "string",
+                    "description": (
+                        "Время в виде ЧЧ:ММ — «06:00». Без даты понимается "
+                        "как ближайшее такое время: сказанное вечером «в "
+                        "шесть» это завтрашнее утро. Если названа другая "
+                        "дата, передавай целиком: «2026-08-25T06:00»."
+                    ),
+                },
+                "label": {
+                    "type": "string",
+                    "description": "Зачем будильник: «на работу». Необязательно.",
+                },
+                "sound": {
+                    "type": "string",
+                    "description": (
+                        "Чем будить, если человек попросил: «шум дождя», "
+                        "«спокойная музыка». Ищется как обычная музыка. "
+                        "Не указывай, если про звук речи не было."
+                    ),
+                },
+            },
+            "required": ["when"],
+        },
+    },
+    {
+        "name": "list_alarms",
+        "description": "Какие будильники стоят. Вызывай на «во сколько будильник».",
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "cancel_alarms",
+        "description": "Отменить все будильники. Вызывай на «отмени будильник».",
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
         "name": "add_current_to_playlist",
         "description": (
             "Добавить играющую сейчас песню в плейлист. Вызывай на «добавь "
@@ -306,6 +354,17 @@ async def dispatch(ctx: ToolContext, name: str, args: dict[str, Any]) -> str:
                 return await timers.set_timer(ctx, int(args["seconds"]), args.get("label"))
             case "cancel_timers":
                 return await timers.cancel_timers(ctx)
+            case "set_alarm":
+                return await alarms.set_alarm(
+                    ctx.settings.alarms_dir,
+                    args["when"],
+                    args.get("label"),
+                    args.get("sound"),
+                )
+            case "list_alarms":
+                return await alarms.list_alarms(ctx.settings.alarms_dir)
+            case "cancel_alarms":
+                return await alarms.cancel_alarms(ctx.settings.alarms_dir)
             case "add_to_list":
                 return await lists.add_to_list(
                     ctx.settings.lists_dir, args["list_name"], args["item"]

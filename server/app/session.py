@@ -16,6 +16,7 @@ from app.audio.mixer import AudioMixer
 from app.audio.vad import SilenceDetector
 from app.config import Settings
 from app.memory import ConversationMemory
+from app.tools import alarms as alarms_tool
 from app.protocol import (
     FRAME_MIC,
     FRAME_SCREEN,
@@ -113,6 +114,7 @@ class Session:
         self._state = State.IDLE
         self._device = "unknown"
         self._voice_failed = False
+        self._alarm_tasks: list[asyncio.Task] = []
 
     # ---------- жизненный цикл ----------
 
@@ -129,6 +131,9 @@ class Session:
             await self._shutdown()
 
     async def _shutdown(self) -> None:
+        for task in self._alarm_tasks:
+            task.cancel()
+        self._alarm_tasks.clear()
         await self._voice.close()
         await self._ctx.cancel_timers()
         await self._mixer.set_music(None)
@@ -256,11 +261,50 @@ class Session:
             self._voice_failed = True
             await self._announce("Не могу подключиться к голосовому сервису.")
 
+        # Будильники поднимаем в любом случае: они не зависят от того,
+        # работает ли разговор — разбудить нужно даже при сбое облака.
+        self._restore_alarms()
+
     async def _set_volume(self, level: float) -> None:
         self._mixer.volume = max(0.0, min(1.0, level))
         with contextlib.suppress(Exception):
             await self._ws.send_json(volume_msg(self._mixer.volume))
         await self._show(f"Громкость {round(self._mixer.volume * 100)}%")
+
+    def _restore_alarms(self) -> None:
+        """Поднимает будильники с диска — их ставили в прошлой сессии.
+
+        Ради этого они и лежат на диске: связь с колонкой рвётся регулярно,
+        а будильник на утро должен пережить ночь целиком.
+        """
+        overdue, upcoming = alarms_tool.due_and_upcoming(self._settings.alarms_dir)
+        for alarm in overdue:
+            # Разбудить задним числом нельзя, а держать вечно — значит
+            # звонить при каждом переподключении.
+            log.info("будильник на %s пропущен, убираю", alarm.at)
+            alarms_tool.drop(self._settings.alarms_dir, alarm.id)
+
+        for alarm in upcoming:
+            task = asyncio.create_task(alarms_tool.wait_and_fire(alarm, self._fire_alarm))
+            self._alarm_tasks.append(task)
+        if upcoming:
+            log.info("восстановлено будильников: %d", len(upcoming))
+
+    async def _fire_alarm(self, alarm) -> None:
+        """Будит: голосом, а если просили — ещё и звуком."""
+        alarms_tool.drop(self._settings.alarms_dir, alarm.id)
+        text = f"Пора вставать. {alarm.label}." if alarm.label else "Пора вставать."
+
+        if alarm.sound:
+            from app.tools import music
+
+            # Музыку включаем первой: она заиграет фоном, а голос прозвучит
+            # поверх — иначе человек услышит фразу в тишине и снова уснёт.
+            try:
+                await music.play_music(self._ctx, alarm.sound)
+            except Exception:
+                log.exception("не удалось включить звук будильника")
+        await self._announce(text)
 
     async def _play_next_in_queue(self) -> None:
         """Трек доиграл — включаем следующий из плейлиста.

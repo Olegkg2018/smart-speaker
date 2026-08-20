@@ -525,7 +525,15 @@ class Session:
     async def _redraw(self) -> None:
         if self._screen is None or not self._screen.available or not self._client_has_screen:
             return
-        bitmap = self._screen.render(self._state, self._screen_text, self._ctx.now_playing)
+        # Отрисовка — упаковка 8192 пикселей в чистом Python, около 16 мс.
+        # Вызывается на каждый кусочек расшифровки речи, а облако шлёт их
+        # пачками не реже, чем звук: та же природа рывков, что раньше нашли
+        # у Vosk и numpy, только на другом узле. Без переноса в поток пачка
+        # из десятка кусков подряд держит цикл событий и не пускает
+        # отправщика кадров ровно столько же, сколько заняли все рендеры.
+        bitmap = await asyncio.to_thread(
+            self._screen.render, self._state, self._screen_text, self._ctx.now_playing
+        )
         if not bitmap:
             return
         with contextlib.suppress(Exception):

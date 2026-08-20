@@ -9,7 +9,17 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from app.tools import alarms, lists, music, news, notes, timers, weather, websearch
+from app.tools import (
+    alarms,
+    homeassistant,
+    lists,
+    music,
+    news,
+    notes,
+    timers,
+    weather,
+    websearch,
+)
 from app.tools.context import ToolContext
 
 log = logging.getLogger(__name__)
@@ -348,6 +358,51 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "input_schema": {"type": "object", "properties": {}, "required": []},
     },
     {
+        "name": "read_sensors",
+        "description": (
+            "Показания датчиков дома: температура, влажность, состояние "
+            "дверей и розеток, заряд, любые сенсоры. Вызывай на «какая "
+            "температура в спальне», «открыта ли дверь», «сколько градусов "
+            "дома».\n"
+            "Это быстрый прямой запрос к дому — используй его для вопросов "
+            "«сколько» и «какое состояние», а не ask_home."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "Часть названия датчика или комнаты: «спальня», "
+                        "«температура», «дверь». Пусто — все датчики подряд."
+                    ),
+                }
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "ask_home",
+        "description": (
+            "Передать команду умному дому его собственному ассистенту: свет, "
+            "розетки, сцены, климат. Он знает все устройства по именам, "
+            "которые им дал хозяин, поэтому фразу передавай почти как "
+            "услышал: «включи свет в спальне», «выключи всё на кухне».\n"
+            "Для вопросов о показаниях датчиков используй read_sensors — он "
+            "быстрее и точнее."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "phrase": {
+                    "type": "string",
+                    "description": "Команда дому обычными словами.",
+                }
+            },
+            "required": ["phrase"],
+        },
+    },
+    {
         "name": "add_current_to_playlist",
         "description": (
             "Добавить играющую сейчас песню в плейлист. Вызывай на «добавь "
@@ -448,6 +503,18 @@ async def dispatch(ctx: ToolContext, name: str, args: dict[str, Any]) -> str:
                 return await notes.forget(ctx.settings.notes_dir, args["matching"])
             case "list_notes":
                 return await notes.list_notes(ctx.settings.notes_dir)
+            case "read_sensors":
+                return await homeassistant.read_sensors(
+                    ctx.settings.ha_url, ctx.settings.ha_token, args.get("query", "")
+                )
+            case "ask_home":
+                if not ctx.settings.ha_allow_control:
+                    # Управление пока выключено намеренно: ошибка
+                    # распознавания не должна щёлкать выключателями.
+                    return "Управление домом сейчас отключено, могу только читать датчики."
+                return await homeassistant.ask_home(
+                    ctx.settings.ha_url, ctx.settings.ha_token, args["phrase"]
+                )
             case "add_to_list":
                 return await lists.add_to_list(
                     ctx.settings.lists_dir, args["list_name"], args["item"]

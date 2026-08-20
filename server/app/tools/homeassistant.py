@@ -27,6 +27,12 @@ _TIMEOUT_S = 8.0
 # Сколько сущностей показывать, когда человек спрашивает «что дома есть».
 _MAX_LISTED = 25
 
+# Что считается датчиком. В доме сотни сущностей, и почти всё остальное —
+# автоматизации, обновления прошивок, кнопки и служебные переключатели. Их
+# названия часто содержат слово «температура», и без этого фильтра на вопрос
+# о погоде колонка зачитывает «Уведомление о прогнозе осадков: off».
+_SENSOR_DOMAINS = ("sensor", "binary_sensor", "climate", "weather")
+
 
 def _headers(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
@@ -50,6 +56,8 @@ async def read_sensors(base_url: str, token: str, query: str) -> str:
     matches = []
     for item in states:
         entity_id = item.get("entity_id", "")
+        if not entity_id.startswith(_SENSOR_DOMAINS):
+            continue
         name = (item.get("attributes", {}) or {}).get("friendly_name", "") or entity_id
         if needle and needle not in name.lower() and needle not in entity_id.lower():
             continue

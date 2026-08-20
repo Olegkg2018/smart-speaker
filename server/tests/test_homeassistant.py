@@ -130,3 +130,36 @@ async def test_non_ascii_token_does_not_crash():
     """Токен с кириллицей — опечатка при настройке, а не повод падать."""
     result = await ha.read_sensors("http://ha", "токен-с-кириллицей", "спальня")
     assert "не отвечает" in result.lower()
+
+
+async def test_automations_are_not_mistaken_for_sensors():
+    """В доме сотни сущностей, и «Уведомление о температуре» — не датчик."""
+    states = [
+        {
+            "entity_id": "sensor.greenhouse_temp",
+            "state": "32.1",
+            "attributes": {"friendly_name": "Температура в теплице", "unit_of_measurement": "°C"},
+        },
+        {
+            "entity_id": "automation.temperature_alert",
+            "state": "off",
+            "attributes": {"friendly_name": "Уведомление о температуре"},
+        },
+        {
+            "entity_id": "update.thermostat_firmware",
+            "state": "on",
+            "attributes": {"friendly_name": "Обновление термостата температура"},
+        },
+    ]
+
+    def handler(request):
+        return httpx.Response(200, json=states)
+
+    original = _client(handler)
+    try:
+        result = await ha.read_sensors("http://ha", "eyJhbGciOiJIUzI1NiJ9.test", "температура")
+    finally:
+        httpx.AsyncClient = original
+
+    assert "теплице" in result
+    assert "Уведомление" not in result and "Обновление" not in result

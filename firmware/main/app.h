@@ -11,6 +11,9 @@
 #define HAPPY_SPK_SAMPLE_RATE 48000
 #define HAPPY_FRAME_MS 20
 #define HAPPY_MIC_FRAME_SAMPLES (HAPPY_MIC_SAMPLE_RATE / 1000 * HAPPY_FRAME_MS)  // 320
+// Эхоподавитель отдаёт звук кусками своей длины, а не микрофонными кадрами:
+// на ESP32-S3 это 512 сэмплов. Буфер отправки считаем по этому размеру.
+#define HAPPY_MIC_MAX_FRAME_SAMPLES 512
 #define HAPPY_SPK_FRAME_SAMPLES (HAPPY_SPK_SAMPLE_RATE / 1000 * HAPPY_FRAME_MS)  // 960
 
 // --- экран ---
@@ -48,6 +51,24 @@ esp_err_t happy_audio_out_start(void);
 // Вызывается из обработчика WebSocket: кладёт полученный кадр в буфер вывода.
 void happy_audio_out_push(const uint8_t *pcm, size_t len);
 void happy_audio_out_flush(void);
+// Копия того, что уходит в динамик, приведённая к частоте микрофона.
+// Эхоподавителю нужен опорный сигнал: он вычитает из микрофона то, что
+// колонка играет сама, иначе она слышит собственную музыку и выполняет
+// команды из песни. Возвращает, сколько сэмплов удалось отдать; недостачу
+// вызывающий дополняет тишиной.
+size_t happy_audio_out_take_reference(int16_t *dst, size_t samples);
+
+// --- обработка звука с микрофона ---
+// Эхоподавление (микрофон перестаёт слышать собственный динамик) плюс
+// автоусиление: без него слышно только вплотную. Если поднять не удалось,
+// звук идёт дальше необработанным — колонка продолжает работать.
+typedef void (*happy_frontend_cb_t)(const int16_t *pcm, size_t samples);
+esp_err_t happy_frontend_start(void);
+void happy_frontend_stop(void);
+bool happy_frontend_available(void);
+// Кадры на входе и выходе разной длины: обработчик копит их до своего
+// размера, поэтому колбэк может не вызваться ни разу или вызваться дважды.
+void happy_frontend_process(const int16_t *mic, size_t samples, happy_frontend_cb_t on_clean);
 
 // --- экран ---
 // Картинку целиком рисует сервер; прошивка только выводит готовый битмап.

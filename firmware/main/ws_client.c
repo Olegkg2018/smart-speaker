@@ -198,8 +198,12 @@ esp_err_t happy_ws_send_mic(const uint8_t *payload, size_t len)
         return ESP_ERR_INVALID_STATE;
     }
     // Заголовок и данные должны уйти одним фреймом, поэтому склеиваем.
-    static uint8_t frame[1 + HAPPY_MIC_FRAME_SAMPLES * 2];
+    // Размер кадра задаёт не микрофон, а эхоподавитель: он копит звук до
+    // своей длины (на ESP32-S3 это 512 сэмплов против 320 у микрофона).
+    // Буфер по размеру микрофонного кадра молча ронял бы такие посылки.
+    static uint8_t frame[1 + HAPPY_MIC_MAX_FRAME_SAMPLES * 2];
     if (len + 1 > sizeof(frame)) {
+        ESP_LOGW(TAG, "кадр микрофона не влез в буфер: %u байт", (unsigned)len);
         return ESP_ERR_INVALID_SIZE;
     }
     frame[0] = HAPPY_FRAME_MIC;

@@ -5,6 +5,7 @@ idf_component_register(
         "ws_client.c"
         "audio_in.c"
         "audio_out.c"
+        "audio_frontend.c"
         "button.c"
         "display.c"
         "led.c"
@@ -17,4 +18,5 @@ idf_component_register(
         driver
         json
         esp_websocket_client
+        esp-sr
 )

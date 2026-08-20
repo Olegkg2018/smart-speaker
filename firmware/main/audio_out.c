@@ -29,6 +29,15 @@ static i2s_chan_handle_t s_tx;
 static StreamBufferHandle_t s_ring;
 static bool s_prebuffering = true;
 
+// Опорный сигнал для эхоподавления: то же, что уходит в динамик, но
+// прорежённое до частоты микрофона. Эхоподавитель сравнивает его с тем, что
+// слышит микрофон, и вычитает — иначе колонка реагирует на собственную речь
+// и музыку. Полсекунды с запасом: больше задержки тракта «динамик — воздух —
+// микрофон», меньше заметного расхода памяти.
+#define REF_RATIO (HAPPY_SPK_SAMPLE_RATE / HAPPY_MIC_SAMPLE_RATE)  // 48к → 16к
+#define REF_RING_SAMPLES (HAPPY_MIC_SAMPLE_RATE / 2)
+static StreamBufferHandle_t s_ref_ring;
+
 static esp_err_t init_i2s(void)
 {
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_1, I2S_ROLE_MASTER);
@@ -53,6 +62,8 @@ static esp_err_t init_i2s(void)
     ESP_ERROR_CHECK(i2s_channel_init_std_mode(s_tx, &std_cfg));
     return i2s_channel_enable(s_tx);
 }
+
+static void push_reference(const uint8_t *pcm, size_t len);
 
 static void speaker_task(void *arg)
 {
@@ -90,9 +101,45 @@ static void speaker_task(void *arg)
         if (got == 0) {
             continue;
         }
+        push_reference(chunk, got);
+
         size_t written = 0;
         i2s_channel_write(s_tx, chunk, got, &written, pdMS_TO_TICKS(200));
     }
+}
+
+// Копию для эхоподавителя снимаем прямо перед записью в I2S, а не при
+// приёме кадра: между приёмом и звучанием лежит буфер в треть секунды, и
+// опорный сигнал разъехался бы с тем, что слышит микрофон.
+static void push_reference(const uint8_t *pcm, size_t len)
+{
+    if (s_ref_ring == NULL) {
+        return;
+    }
+    const int16_t *src = (const int16_t *)pcm;
+    size_t samples = len / 2;
+    static int16_t down[HAPPY_SPK_FRAME_SAMPLES / REF_RATIO];
+    size_t out = 0;
+
+    // Прореживание с усреднением: простое «брать каждый третий» даёт
+    // призвуки, из-за которых эхоподавитель хуже находит эхо.
+    for (size_t i = 0; i + REF_RATIO <= samples && out < sizeof(down) / 2; i += REF_RATIO) {
+        int32_t sum = 0;
+        for (int k = 0; k < REF_RATIO; k++) {
+            sum += src[i + k];
+        }
+        down[out++] = (int16_t)(sum / REF_RATIO);
+    }
+    if (out == 0) {
+        return;
+    }
+    // Не ждём: опорный сигнал важен, но не ценой заикания динамика.
+    // Переполнение значит, что микрофон не забирает — старое всё равно
+    // бесполезно, поэтому освобождаем место.
+    if (xStreamBufferSpacesAvailable(s_ref_ring) < out * 2) {
+        xStreamBufferReset(s_ref_ring);
+    }
+    xStreamBufferSend(s_ref_ring, down, out * 2, 0);
 }
 
 esp_err_t happy_audio_out_start(void)
@@ -101,6 +148,12 @@ esp_err_t happy_audio_out_start(void)
     if (s_ring == NULL) {
         ESP_LOGE(TAG, "не хватило памяти на буфер вывода");
         return ESP_ERR_NO_MEM;
+    }
+    s_ref_ring = xStreamBufferCreate(REF_RING_SAMPLES * 2, 1);
+    if (s_ref_ring == NULL) {
+        // Без опорного сигнала эхоподавитель работать не сможет, но сама
+        // колонка — вполне: продолжаем без него.
+        ESP_LOGW(TAG, "не хватило памяти на опорный сигнал — эхоподавление отключено");
     }
     ESP_ERROR_CHECK(init_i2s());
     if (xTaskCreate(speaker_task, "speaker", 4096, NULL, 7, NULL) != pdPASS) {
@@ -131,4 +184,17 @@ void happy_audio_out_flush(void)
         xStreamBufferReset(s_ring);
         s_prebuffering = true;
     }
+    // Старое эхо больше не прозвучит — сравнивать микрофон не с чем.
+    if (s_ref_ring != NULL) {
+        xStreamBufferReset(s_ref_ring);
+    }
+}
+
+size_t happy_audio_out_take_reference(int16_t *dst, size_t samples)
+{
+    if (s_ref_ring == NULL) {
+        return 0;
+    }
+    size_t got = xStreamBufferReceive(s_ref_ring, dst, samples * 2, 0);
+    return got / 2;
 }

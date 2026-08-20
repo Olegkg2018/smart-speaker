@@ -46,6 +46,11 @@ static esp_err_t init_i2s(void)
     return i2s_channel_enable(s_rx);
 }
 
+static void send_clean(const int16_t *pcm, size_t samples)
+{
+    happy_ws_send_mic((const uint8_t *)pcm, samples * sizeof(int16_t));
+}
+
 static void mic_task(void *arg)
 {
     static int32_t raw[HAPPY_MIC_FRAME_SAMPLES];
@@ -70,7 +75,10 @@ static void mic_task(void *arg)
             if (value < INT16_MIN) value = INT16_MIN;
             pcm[i] = (int16_t)value;
         }
-        happy_ws_send_mic((const uint8_t *)pcm, samples * sizeof(int16_t));
+        // Эхоподавитель вычитает то, что играет сама колонка, автоусиление
+        // подтягивает далёкий голос. Кадры у него своей длины, поэтому
+        // отправкой занимается колбэк, а не этот цикл.
+        happy_frontend_process(pcm, samples, send_clean);
     }
 }
 

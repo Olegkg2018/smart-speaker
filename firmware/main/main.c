@@ -82,6 +82,8 @@ void app_main(void)
     ESP_ERROR_CHECK(happy_led_start());
     ESP_ERROR_CHECK(happy_display_start());
     ESP_ERROR_CHECK(happy_audio_out_start());
+    // Обработку поднимаем до микрофона: он сразу начнёт гнать через неё звук.
+    ESP_ERROR_CHECK(happy_frontend_start());
     ESP_ERROR_CHECK(happy_audio_in_start());
     ESP_ERROR_CHECK(happy_button_start(on_button));
 

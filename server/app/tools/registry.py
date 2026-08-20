@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from app.tools import alarms, lists, music, news, timers, weather
+from app.tools import alarms, lists, music, news, notes, timers, weather, websearch
 from app.tools.context import ToolContext
 
 log = logging.getLogger(__name__)
@@ -277,6 +277,77 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "input_schema": {"type": "object", "properties": {}, "required": []},
     },
     {
+        "name": "web_search",
+        "description": (
+            "Найти в интернете то, чего не знаешь и что не покрыто другими "
+            "инструментами: курс валют, часы работы заведения, счёт матча, "
+            "цены, справочные факты, недавние события. Вызывай, когда "
+            "собственных сведений не хватает или они могли устареть — "
+            "лучше поискать, чем ответить наугад.\n"
+            "Не подменяй им другие инструменты: погоду спрашивай через "
+            "get_weather, новости через get_news, музыку включай play_music."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "Вопрос обычными словами, на языке собеседника. "
+                        "Например: «курс доллара к гривне сегодня»."
+                    ),
+                }
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "remember",
+        "description": (
+            "Запомнить надолго: имена домашних, предпочтения, привычки, "
+            "постоянные указания. Вызывай на «запомни, что…», «с этого "
+            "момента…», «имей в виду».\n"
+            "Это не то же самое, что список дел: сюда идёт знание о людях и "
+            "доме, а не задачи. И не то же, что история разговора: она "
+            "вытесняется новыми репликами, а это останется навсегда."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "note": {
+                    "type": "string",
+                    "description": (
+                        "Короткая фраза от третьего лица: «жену хозяина "
+                        "зовут Марина», «в доме не едят мясо»."
+                    ),
+                }
+            },
+            "required": ["note"],
+        },
+    },
+    {
+        "name": "forget",
+        "description": (
+            "Забыть ранее запомненное. Вызывай на «забудь про…». Удаляет "
+            "все заметки, где встречается указанное слово."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "matching": {
+                    "type": "string",
+                    "description": "Слово из заметки, например «мясо».",
+                }
+            },
+            "required": ["matching"],
+        },
+    },
+    {
+        "name": "list_notes",
+        "description": "Что колонка помнит о доме. Вызывай на «что ты помнишь».",
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
         "name": "add_current_to_playlist",
         "description": (
             "Добавить играющую сейчас песню в плейлист. Вызывай на «добавь "
@@ -365,6 +436,18 @@ async def dispatch(ctx: ToolContext, name: str, args: dict[str, Any]) -> str:
                 return await alarms.list_alarms(ctx.settings.alarms_dir)
             case "cancel_alarms":
                 return await alarms.cancel_alarms(ctx.settings.alarms_dir)
+            case "web_search":
+                return await websearch.web_search(
+                    ctx.settings.openai_api_key,
+                    ctx.settings.web_search_model,
+                    args["query"],
+                )
+            case "remember":
+                return await notes.remember(ctx.settings.notes_dir, args["note"])
+            case "forget":
+                return await notes.forget(ctx.settings.notes_dir, args["matching"])
+            case "list_notes":
+                return await notes.list_notes(ctx.settings.notes_dir)
             case "add_to_list":
                 return await lists.add_to_list(
                     ctx.settings.lists_dir, args["list_name"], args["item"]

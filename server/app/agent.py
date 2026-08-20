@@ -64,6 +64,12 @@ class Agent:
         self._client = AsyncAnthropic(api_key=settings.anthropic_api_key or None)
         self._history: list[dict[str, Any]] = []
 
+    def _notes(self) -> str:
+        """Постоянные заметки о доме — они живут дольше истории разговора."""
+        from app.tools import notes
+
+        return notes.as_instructions(self._settings.notes_dir)
+
     def reset(self) -> None:
         self._history.clear()
 
@@ -115,7 +121,7 @@ class Agent:
             system=[
                 {
                     "type": "text",
-                    "text": SYSTEM_PROMPT,
+                    "text": SYSTEM_PROMPT + self._notes(),
                     # Промпт не меняется между запросами — пусть кэшируется,
                     # если дорастёт до минимального размера кэша.
                     "cache_control": {"type": "ephemeral"},

@@ -24,6 +24,7 @@ from app.agent import SYSTEM_PROMPT
 from app.audio.resample import resample_pcm16
 from app.config import Settings
 from app.memory import Turn
+from app.tools import notes as notes_tool
 from app.pricing import CostMeter
 from app.protocol import State
 from app.tools.context import ToolContext
@@ -39,7 +40,7 @@ def _decode_and_resample(delta: str, src_rate: int, dst_rate: int) -> bytes:
     return resample_pcm16(base64.b64decode(delta), src_rate, dst_rate)
 
 
-def _build_instructions(history: list[Turn]) -> str:
+def _build_instructions(history: list[Turn], notes: str = "") -> str:
     """SYSTEM_PROMPT плюс краткий пересказ прошлого разговора, если он есть.
 
     Realtime API не даёт напрямую подсадить историю сообщений в сессию так
@@ -49,12 +50,12 @@ def _build_instructions(history: list[Turn]) -> str:
     от точной схемы API.
     """
     if not history:
-        return SYSTEM_PROMPT
+        return SYSTEM_PROMPT + notes
     recap = "\n".join(
         f"{'Пользователь' if t.role == 'user' else 'Ты'}: {t.text}" for t in history
     )
     return (
-        f"{SYSTEM_PROMPT}\n\n"
+        f"{SYSTEM_PROMPT}{notes}\n\n"
         "Ниже — последние реплики более раннего разговора с этим человеком, "
         "для контекста. Это не текущая реплика, отвечать на неё не нужно:\n"
         f"{recap}"
@@ -93,7 +94,7 @@ class RealtimeVoice:
         await self._conn.session.update(
             session={
                 "type": "realtime",
-                "instructions": _build_instructions(history),
+                "instructions": _build_instructions(history, notes_tool.as_instructions(self._settings.notes_dir)),
                 "output_modalities": ["audio"],
                 "audio": {
                     "input": {

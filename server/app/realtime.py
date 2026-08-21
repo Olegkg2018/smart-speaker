@@ -96,8 +96,15 @@ class RealtimeVoice:
         self._cost = CostMeter(settings.openai_realtime_model)
         self._mic_batch = bytearray()
         self._batch_bytes = settings.mic_sample_rate * _SEND_BATCH_MS // 1000 * 2
+        self._history: list[Turn] = []
+        self._reconnecting = False
 
     async def start(self, history: list[Turn]) -> None:
+        # Запоминаем для переподключения: OpenAI сама рвёт сессию через час
+        # («Your session hit the maximum duration of 60 minutes» — не ошибка,
+        # а объявленный лимит), и без повторного старта колонка навсегда
+        # остаётся с мёртвым соединением — слушает команды, но не отвечает.
+        self._history = history
         self._manager = self._client.realtime.connect(model=self._settings.openai_realtime_model)
         self._conn = await self._manager.__aenter__()
         await self._conn.session.update(
@@ -183,6 +190,9 @@ class RealtimeVoice:
                 self._cost.turns,
                 self._cost.total_usd / self._cost.turns,
             )
+        # Не переподключаться после закрытия сессии — иначе разговор с уже
+        # отключившейся колонкой продолжит держать соединение с OpenAI.
+        self._reconnecting = True
         if self._recv_task is not None:
             self._recv_task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -223,6 +233,23 @@ class RealtimeVoice:
             with contextlib.suppress(Exception):
                 await self._cb.wait_drained()
             await self._cb.turn_done()
+            if not self._reconnecting:
+                asyncio.create_task(self._reconnect())
+
+    async def _reconnect(self) -> None:
+        """Поднимает сессию заново после разрыва — час OpenAI держит её сам.
+
+        Без этого колонка после часа разговора остаётся с мёртвым
+        соединением: мигает состояниями, но ничего не отвечает, и со
+        стороны это неотличимо от «не слышит».
+        """
+        try:
+            await self.start(self._history)
+            log.info("соединение с OpenAI Realtime восстановлено")
+        except Exception:
+            log.exception("не удалось переподключиться к OpenAI Realtime")
+            with contextlib.suppress(Exception):
+                await self._ctx.speak("Голосовой сервис пока недоступен.")
 
     async def _on_event(self, event) -> None:
         etype = event.type

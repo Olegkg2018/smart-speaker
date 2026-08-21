@@ -55,3 +55,48 @@ async def test_recv_loop_lets_the_sender_run():
 
     # Без уступки соседняя задача успела бы провернуться считанные разы.
     assert ticks >= 50, f"отправщик получил управление всего {ticks} раз"
+
+
+class _DyingConnection:
+    """Соединение, которое рвётся сразу — как сессия OpenAI по часовому лимиту."""
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        raise RuntimeError("Your session hit the maximum duration of 60 minutes.")
+
+
+class _Callbacks:
+    async def wait_drained(self):
+        return None
+
+    async def turn_done(self):
+        return None
+
+
+async def test_recv_loop_reconnects_after_session_expires():
+    """OpenAI рвёт сессию сама через час — колонка должна поднять новую.
+
+    Без переподключения соединение остаётся мёртвым навсегда: колонка
+    слушает команды, но ничего не отвечает — неотличимо от «не слышит».
+    """
+    voice = RealtimeVoice.__new__(RealtimeVoice)
+    voice._conn = _DyingConnection()
+    voice._cb = _Callbacks()
+    voice._reconnecting = False
+    voice._history = []
+
+    started = []
+
+    async def fake_start(history):
+        started.append(history)
+
+    voice.start = fake_start
+
+    await voice._recv_loop()
+    # _reconnect() запускается фоновой задачей — даём ей шанс выполниться.
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert started, "переподключение не было запущено после разрыва сессии"

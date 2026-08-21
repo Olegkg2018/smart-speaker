@@ -26,12 +26,18 @@ S905X3 (Armbian) в Docker. Разговор ведёт облачная мод�
 export HAPPY_HOST=<адрес платы в домашней сети>
 ```
 
+На плате код лежит по симлинку `/opt/docker/happy` — как и все остальные
+контейнеры на этой машине, но физически на HDD (`/mnt/data/happy`), а не на
+microSD: `data/` пишется часто (память разговоров, будильники, индекс
+фонотеки каждую ночь), а у карты ограниченный ресурс перезаписи. Симлинк
+прозрачен для всех команд ниже — писать можно как обычно.
+
 ```bash
 # сервер
 cd /home/oleg/happy
-tar -czf - server/app/… | ssh "$HAPPY_HOST" 'tar -xzf - -C /home/oleg/happy'
-ssh "$HAPPY_HOST" 'docker compose -f /home/oleg/happy/server/docker-compose.yml build'
-ssh "$HAPPY_HOST" 'docker compose -f /home/oleg/happy/server/docker-compose.yml up -d --force-recreate'
+tar -czf - server/app/… | ssh "$HAPPY_HOST" 'tar -xzf - -C /opt/docker/happy'
+ssh "$HAPPY_HOST" 'docker compose -f /opt/docker/happy/server/docker-compose.yml build'
+ssh "$HAPPY_HOST" 'docker compose -f /opt/docker/happy/server/docker-compose.yml up -d --force-recreate'
 ```
 
 Сборка занимает минуты и иногда падает по сети (таймаут pypi, IPv6 до
@@ -128,7 +134,7 @@ SoundCloud, YouTube оставлен запасным.
 ## Тесты
 
 ```bash
-cd server && python3 -m pytest    # 59 тестов
+cd server && python3 -m pytest    # 157 тестов
 ```
 
 Запускать именно из `server/`: в корне не подхватывается `asyncio_mode`

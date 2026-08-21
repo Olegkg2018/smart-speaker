@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
+from app.audio import music_index
 from app.cloud_speech import CloudSpeechToText, CloudTextToSpeech
 from app.config import settings
 from app.screen import ScreenRenderer
@@ -70,6 +73,51 @@ screen = ScreenRenderer(
     font_path=settings.screen_font,
 )
 
+# Во сколько ночи (местное время контейнера — TZ выставлен в
+# docker-compose.yml) пересчитывать теги фонотеки. Три часа не пересекается
+# ни с разговором, ни с будильниками на утро.
+_MUSIC_INDEX_HOUR = 3
+
+
+async def _music_index_loop() -> None:
+    """Раз в сутки размечает фонотеку по жанру/настроению/поводу.
+
+    Без этого «поставь весёлую музыку» или «шум дождя» находит трек только
+    если это слово случайно оказалось в имени файла — см. app.audio.music_index.
+    """
+    if not settings.openai_api_key:
+        log.info("OPENAI_API_KEY не задан — разметка фонотеки по настроению отключена")
+        return
+
+    # Первый прогон — сразу, а не только следующей ночью: иначе на свежем
+    # сервере индекс пустует до утра.
+    if not music_index.index_file_path(settings.music_index_dir).exists():
+        try:
+            await music_index.refresh(
+                settings.music_dir,
+                settings.music_index_dir,
+                settings.openai_api_key,
+                settings.web_search_model,
+            )
+        except Exception:
+            log.exception("не удалось построить индекс фонотеки")
+
+    while True:
+        now = datetime.now()
+        next_run = now.replace(hour=_MUSIC_INDEX_HOUR, minute=0, second=0, microsecond=0)
+        if next_run <= now:
+            next_run += timedelta(days=1)
+        await asyncio.sleep((next_run - now).total_seconds())
+        try:
+            await music_index.refresh(
+                settings.music_dir,
+                settings.music_index_dir,
+                settings.openai_api_key,
+                settings.web_search_model,
+            )
+        except Exception:
+            log.exception("не удалось обновить индекс фонотеки")
+
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
@@ -107,8 +155,13 @@ async def lifespan(_: FastAPI):
         log.warning("ANTHROPIC_API_KEY не задан — агент работать не будет")
     if "openai" in (settings.stt_provider, settings.tts_provider) and not settings.openai_api_key:
         log.warning("OPENAI_API_KEY не задан — облачные распознавание и синтез не заработают")
+
+    music_index_task = asyncio.create_task(_music_index_loop())
     log.info("сервер готов, слушаю %s:%d", settings.host, settings.port)
     yield
+    music_index_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await music_index_task
 
 
 app = FastAPI(title="Happy Speaker", lifespan=lifespan)

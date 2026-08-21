@@ -25,7 +25,7 @@ _FIRST_CHUNK_TIMEOUT_STREAM_S = 25.0
 
 
 async def play_music(ctx: ToolContext, query: str) -> str:
-    found = await resolve_track(query, ctx.settings.music_dir)
+    found = await resolve_track(query, ctx.settings.music_dir, ctx.settings.music_index_dir)
     if found is None:
         return f"Не нашёл ничего по запросу «{query}»."
 

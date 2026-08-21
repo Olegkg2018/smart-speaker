@@ -11,6 +11,8 @@ from pathlib import Path
 
 import numpy as np
 
+from app.audio import music_index
+
 log = logging.getLogger(__name__)
 
 
@@ -160,8 +162,11 @@ class FfmpegSource:
         self._ytdlp_proc = None
 
 
-async def resolve_track(query: str, music_dir: Path) -> tuple[str, str] | None:
-    """Ищет трек: сначала домашняя библиотека, потом интернет.
+async def resolve_track(
+    query: str, music_dir: Path, music_index_dir: Path | None = None
+) -> tuple[str, str] | None:
+    """Ищет трек: сначала домашняя библиотека по имени, потом по индексу
+    настроения/жанра/повода, потом интернет.
 
     Возвращает (url_или_путь, человекочитаемое название) либо None.
     """
@@ -172,6 +177,14 @@ async def resolve_track(query: str, music_dir: Path) -> tuple[str, str] | None:
     local = await asyncio.to_thread(_search_local, query, music_dir)
     if local is not None:
         return str(local), local.stem
+    if music_index_dir is not None:
+        # «Весёлую музыку» или «шум дождя» по имени файла не найти — эти
+        # слова знает только ночная разметка (app.audio.music_index).
+        indexed = await asyncio.to_thread(
+            music_index.search, music_dir, music_index_dir, query
+        )
+        if indexed is not None:
+            return indexed
     return await _search_online(query)
 
 

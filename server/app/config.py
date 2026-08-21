@@ -179,6 +179,10 @@ class Settings(BaseSettings):
     # Идут наравне с лентами СМИ — местные новости часто есть только здесь.
     news_telegram_channels: list[str] = ["insiderUKR", "hyevuy_k_r"]
     music_dir: Path = SERVER_ROOT / "music"
+    # Разметка фонотеки по жанру/настроению/поводу — обычная папка на диске,
+    # как остальное в data/, чтобы её можно было стереть руками, если модель
+    # ошиблась. Строится и обновляется ночью в main.py, читается в player.py.
+    music_index_dir: Path = SERVER_ROOT / "data" / "music_index"
 
     @property
     def frame_samples_out(self) -> int:

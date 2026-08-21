@@ -35,7 +35,6 @@ class ScreenRenderer:
         self._font_path = font_path
         self._available = False
         self._font = None
-        self._font_small = None
         self._image_mod = None
         self._draw_mod = None
 
@@ -52,7 +51,6 @@ class ScreenRenderer:
         self._image_mod = Image
         self._draw_mod = ImageDraw
         self._font = ImageFont.truetype(str(self._font_path), 11)
-        self._font_small = ImageFont.truetype(str(self._font_path), 9)
         self._available = True
         log.info("экран %dx%d, шрифт %s", self.width, self.height, self._font_path.name)
 

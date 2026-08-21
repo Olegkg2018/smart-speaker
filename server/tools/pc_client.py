@@ -17,7 +17,6 @@ import asyncio
 import json
 import sys
 
-import numpy as np
 import sounddevice as sd
 import websockets
 
@@ -49,12 +48,12 @@ async def main() -> None:
         mic_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=100)
         speaker_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=200)
 
-        def on_mic(indata, frames, time_info, status) -> None:
+        def on_mic(indata, _frames, _time_info, _status) -> None:
             # Колбэк живёт в потоке PortAudio — в цикл событий кладём потокобезопасно.
             if recording.is_set():
                 loop.call_soon_threadsafe(_put_nowait, mic_queue, bytes(indata))
 
-        def on_speaker(outdata, frames, time_info, status) -> None:
+        def on_speaker(outdata, _frames, _time_info, _status) -> None:
             try:
                 chunk = speaker_queue.get_nowait()
             except asyncio.QueueEmpty:

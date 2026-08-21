@@ -1,7 +1,9 @@
 """Приём событий от облака не должен глушить отправку звука на колонку."""
 
 import asyncio
+import types
 
+import app.realtime as realtime_mod
 from app.realtime import RealtimeVoice
 
 
@@ -215,3 +217,47 @@ async def test_proactive_refresh_skips_dead_connection():
     await voice._proactive_refresh(delay_s=0)
 
     assert not started, "обновлять мёртвое соединение незачем"
+
+
+class _FakeConn:
+    def __init__(self):
+        self.created_items = []
+        self.responses_created = 0
+
+        async def _create_item(item):
+            self.created_items.append(item)
+
+        async def _create_response():
+            self.responses_created += 1
+
+        self.conversation = types.SimpleNamespace(
+            item=types.SimpleNamespace(create=_create_item)
+        )
+        self.response = types.SimpleNamespace(create=_create_response)
+
+
+async def test_run_tool_drops_result_if_connection_changed_mid_dispatch(monkeypatch):
+    """Долгий инструмент (например, web_search) может пережить переподключение.
+
+    Раньше проверялось только "self._conn is None" — а свежее соединение
+    после успешного _reconnect() тоже не None, просто это уже другая
+    сессия, ничего не знающая про call_id из старой. Результат должен
+    потеряться с предупреждением в лог, а не уйти не по адресу.
+    """
+    voice = RealtimeVoice.__new__(RealtimeVoice)
+    voice._ctx = None
+    old_conn = _FakeConn()
+    new_conn = _FakeConn()
+    voice._conn = old_conn
+
+    async def fake_dispatch(ctx, name, args):
+        # Соединение "переподключилось" прямо во время долгого инструмента.
+        voice._conn = new_conn
+        return "результат"
+
+    monkeypatch.setattr(realtime_mod, "dispatch", fake_dispatch)
+
+    await voice._run_tool("call-1", "web_search", "{}")
+
+    assert old_conn.created_items == [] and old_conn.responses_created == 0
+    assert new_conn.created_items == [] and new_conn.responses_created == 0

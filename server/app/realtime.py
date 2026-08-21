@@ -370,14 +370,21 @@ class RealtimeVoice:
 
     async def _run_tool(self, call_id: str, name: str, raw_args: str) -> None:
         log.info("инструмент %s(%s)", name, raw_args)
+        # Запоминаем ИМЕННО этот объект соединения: пока dispatch() ждёт
+        # (например, долгий web_search), сессия может успеть порваться и
+        # переподключиться. self._conn is None этого не ловит — новое
+        # соединение тоже не None, а call_id принадлежит старому и в новой
+        # сессии неизвестен.
+        conn = self._conn
         try:
             args = json.loads(raw_args) if raw_args else {}
         except json.JSONDecodeError:
             args = {}
         output = await dispatch(self._ctx, name, args)
-        if self._conn is None:
+        if conn is None or self._conn is not conn:
+            log.warning("соединение сменилось во время %s — результат инструмента потерян", name)
             return
-        await self._conn.conversation.item.create(
+        await conn.conversation.item.create(
             item={"type": "function_call_output", "call_id": call_id, "output": output}
         )
-        await self._conn.response.create()
+        await conn.response.create()

@@ -139,11 +139,19 @@ def drop(alarms_dir: Path, alarm_id: str) -> None:
 
 
 def due_and_upcoming(alarms_dir: Path) -> tuple[list[Alarm], list[Alarm]]:
-    """Делит будильники на просроченные и те, что ещё впереди."""
+    """Делит будильники на просроченные и те, что ещё впереди.
+
+    «Просрочен» — это дольше _LATE_TOLERANCE в прошлом, а не просто «уже
+    наступил». Разница важна: колонка переподключается регулярно (см.
+    CLAUDE.md), и будильник, время которого настало ровно в момент
+    реконнекта, раньше выбрасывался здесь безоговорочно — хотя
+    wait_and_fire() для него сработал бы: он сам умеет будить сразу,
+    если опоздание в пределах допуска.
+    """
     now = datetime.now()
     overdue, upcoming = [], []
     for alarm in load(alarms_dir):
-        (overdue if alarm.when <= now else upcoming).append(alarm)
+        (overdue if now - alarm.when > _LATE_TOLERANCE else upcoming).append(alarm)
     return overdue, upcoming
 
 

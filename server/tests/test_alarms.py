@@ -93,6 +93,24 @@ def test_overdue_and_upcoming_are_separated(tmp_path):
     assert [a.id for a in upcoming] == ["future"]
 
 
+def test_barely_late_alarm_is_not_dropped_as_overdue(tmp_path):
+    """Реконнект колонки ровно в момент срабатывания — обычное дело.
+
+    Будильник, просроченный на секунду, обязан остаться в «upcoming»:
+    wait_and_fire() сам умеет разбудить сразу, если опоздание в пределах
+    допуска. Раньше due_and_upcoming() резал по голому "в прошлом" и такой
+    будильник молча выбрасывался в _restore_alarms(), даже не долетев до
+    этой проверки.
+    """
+    alarms.save(
+        tmp_path,
+        [alarms.Alarm(id="just-late", at=(datetime.now() - timedelta(seconds=1)).isoformat())],
+    )
+    overdue, upcoming = alarms.due_and_upcoming(tmp_path)
+    assert [a.id for a in overdue] == []
+    assert [a.id for a in upcoming] == ["just-late"]
+
+
 def test_broken_file_does_not_crash(tmp_path):
     (tmp_path / "alarms.json").write_text("не json", encoding="utf-8")
     assert alarms.load(tmp_path) == []

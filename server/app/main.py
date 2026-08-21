@@ -17,7 +17,6 @@ from app.screen import ScreenRenderer
 from app.session import Session
 from app.stt import SpeechToText
 from app.tts import TextToSpeech
-from app.wakeword import WakeWordModel
 
 logging.basicConfig(
     level=logging.INFO,
@@ -61,12 +60,6 @@ else:
         models_dir=settings.models_dir,
         out_sample_rate=settings.out_sample_rate,
     )
-wake_model = WakeWordModel(
-    model_dir=settings.vosk_model_dir,
-    wake_word=settings.wake_word,
-    sample_rate=settings.mic_sample_rate,
-    extra_words=settings.wake_word_neighbours,
-)
 screen = ScreenRenderer(
     width=settings.screen_width,
     height=settings.screen_height,
@@ -146,8 +139,6 @@ async def lifespan(_: FastAPI):
     tts.load()
     if settings.screen_enabled:
         screen.load()
-    if settings.wake_word_enabled:
-        wake_model.load()
     if settings.voice_provider == "openai_realtime":
         if not settings.openai_api_key:
             log.warning("OPENAI_API_KEY не задан — агент работать не будет")
@@ -205,7 +196,6 @@ async def stats() -> dict[str, object]:
             "avg": round(sum(delays) / len(delays), 1),
             "max": round(max(delays), 1),
         },
-        "wake_word": settings.wake_word if settings.wake_word_enabled else None,
     }
 
 
@@ -224,7 +214,6 @@ async def stream(ws: WebSocket) -> None:
         stt,
         tts,
         screen if settings.screen_enabled else None,
-        wake_model,
     )
     try:
         await session.run()

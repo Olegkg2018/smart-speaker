@@ -34,7 +34,6 @@ from app.stt import SpeechToText
 from app.tools.context import ToolContext
 from app.tts import TextToSpeech
 from app.voice import ClaudeVoice, VoiceBackend, VoiceCallbacks
-from app.wakeword import WakeWordModel
 
 log = logging.getLogger(__name__)
 
@@ -64,7 +63,6 @@ class Session:
         stt: SpeechToText,
         tts: TextToSpeech,
         screen: ScreenRenderer | None = None,
-        wake_model: WakeWordModel | None = None,
     ):
         self._ws = ws
         self._settings = settings
@@ -106,14 +104,6 @@ class Session:
             min_speech_ms=settings.vad_min_speech_ms,
             speech_factor=settings.vad_speech_factor,
         )
-        # Модель общая на весь сервер (весит под сотню мегабайт), а
-        # распознаватель — свой: KaldiRecognizer хранит состояние и портится,
-        # когда в него пишут две сессии сразу.
-        if wake_model is None:
-            wake_model = WakeWordModel(
-                settings.vosk_model_dir, settings.wake_word, settings.mic_sample_rate, []
-            )
-        self._wake = wake_model.for_session()
         self._recording = False
         self._mic_bytes = 0
         self._listen_started = 0.0
@@ -170,22 +160,13 @@ class Session:
         pcm = self._mic_codec.decode(payload)
 
         if not self._recording:
-            # Заодно замеряем, насколько тихо в комнате: к началу реплики
-            # порог речи уже подстроен под обстановку.
-            self._vad.observe_noise(pcm)
-
-            # Пока играет музыка, микрофон слышит её же — эхоподавления на
-            # плате нет. Распознаватель ловит слова из песни и колонка
-            # выполняет команды, которых никто не давал. Поэтому во время
-            # музыки активация только кнопкой.
-            if self._mixer.is_playing and not self._settings.wake_word_while_playing:
-                return
-
-            # Ключевое место всей затеи: пока слово не прозвучало, звук
-            # дальше этой строки не идёт — ни в облако, ни в бэкенд.
-            if self._wake.available and await self._wake.feed(pcm):
-                log.info("услышал «%s»", self._settings.wake_word)
-                await self._start_recording()
+            # Активационное слово ищет сама плата (ESP-SR/WakeNet) — сюда
+            # кадр попадает уже после срабатывания или нажатия кнопки, пока
+            # сервер ещё не обработал текстовое подтверждение начала записи.
+            # Пока играет музыка, микрофон слышит её же — не подмешиваем это
+            # в оценку фонового шума комнаты.
+            if not self._mixer.is_playing:
+                self._vad.observe_noise(pcm)
             return
 
         self._mic_bytes += len(pcm)
@@ -385,7 +366,6 @@ class Session:
         speech_bytes = self._settings.mic_sample_rate * _MIN_UTTERANCE_MS // 1000 * 2
         if not self._vad.heard_speech or self._mic_bytes < speech_bytes:
             log.info("реплика пустая или слишком короткая — не отправляю")
-            self._wake.reset()
             await self._voice.barge_in()
             await self._set_idle()
             return
@@ -397,7 +377,6 @@ class Session:
         if not self._recording:
             return
         self._recording = False
-        self._wake.reset()
         await self._voice.barge_in()
         await self._set_idle()
 

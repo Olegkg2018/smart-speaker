@@ -110,10 +110,11 @@ async def test_recv_loop_reconnects_after_session_expires():
     voice._cb = _Callbacks()
     voice._reconnecting = False
     voice._history = []
+    voice._summary = ""
 
     started = []
 
-    async def fake_start(history):
+    async def fake_start(history, summary=""):
         started.append(history)
 
     voice.start = fake_start
@@ -140,6 +141,7 @@ async def test_recv_loop_reconnects_on_clean_close():
     voice._cb = _Callbacks()
     voice._reconnecting = False
     voice._history = []
+    voice._summary = ""
 
     async def _noop(_event):
         return None
@@ -148,7 +150,7 @@ async def test_recv_loop_reconnects_on_clean_close():
 
     started = []
 
-    async def fake_start(history):
+    async def fake_start(history, summary=""):
         started.append(history)
 
     voice.start = fake_start
@@ -168,6 +170,7 @@ def _idle_voice():
     voice._recv_task = None
     voice._manager = None
     voice._history = []
+    voice._summary = ""
     return voice
 
 
@@ -176,7 +179,7 @@ async def test_proactive_refresh_swaps_connection_when_idle():
     voice = _idle_voice()
     started = []
 
-    async def fake_start(history):
+    async def fake_start(history, summary=""):
         started.append(history)
 
     voice.start = fake_start
@@ -193,7 +196,7 @@ async def test_proactive_refresh_defers_while_speaking():
     voice._speaking = True
     started = []
 
-    async def fake_start(history):
+    async def fake_start(history, summary=""):
         started.append(history)
 
     voice.start = fake_start
@@ -209,7 +212,7 @@ async def test_proactive_refresh_skips_dead_connection():
     voice._conn = None
     started = []
 
-    async def fake_start(history):
+    async def fake_start(history, summary=""):
         started.append(history)
 
     voice.start = fake_start

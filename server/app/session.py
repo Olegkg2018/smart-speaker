@@ -15,6 +15,7 @@ from app.audio.codec import Codec, make_codec
 from app.audio.mixer import AudioMixer
 from app.audio.vad import SilenceDetector
 from app.config import Settings
+from app import memory_summary
 from app.memory import ConversationMemory
 from app.notify import TelegramNotifier
 from app.tools import alarms as alarms_tool
@@ -267,7 +268,10 @@ class Session:
     async def _start_voice(self) -> None:
         """Поднимает голосовой бэкенд, не задерживая приём от колонки."""
         try:
-            await self._voice.start(self._memory.turns if self._memory else [])
+            await self._voice.start(
+                self._memory.turns if self._memory else [],
+                self._memory.summary if self._memory else "",
+            )
             self._voice_ready = True
         except Exception:
             # Ключ неверный, нет сети, кончилась квота. Ронять сессию нельзя:
@@ -331,11 +335,27 @@ class Session:
 
     async def _save_turn(self, role: str, text: str) -> None:
         if self._memory is not None:
-            self._memory.append(role, text)
+            evicted = self._memory.append(role, text)
+            if evicted:
+                # Не должно задерживать разговор — тот же приём, что и у
+                # пересылки в Telegram чуть ниже. Раньше вытесненное из окна
+                # памяти пропадало насовсем; теперь сворачивается в сводку.
+                asyncio.create_task(self._fold_memory(evicted))
         if self._notifier is not None:
             # Пересылка не должна задерживать разговор: колонка ждёт ответа,
             # а не доставки в мессенджер.
             asyncio.create_task(self._notifier.on_turn(role, text))
+
+    async def _fold_memory(self, evicted: list) -> None:
+        assert self._memory is not None
+        new_summary = await memory_summary.fold_in(
+            self._settings.openai_api_key,
+            self._settings.web_search_model,
+            self._memory.summary,
+            evicted,
+        )
+        if new_summary != self._memory.summary:
+            self._memory.set_summary(new_summary)
 
     # ---------- запись и обработка ----------
 

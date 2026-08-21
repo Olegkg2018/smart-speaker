@@ -40,7 +40,7 @@ class VoiceCallbacks:
 
 
 class VoiceBackend(Protocol):
-    async def start(self, history: list[Turn]) -> None: ...
+    async def start(self, history: list[Turn], summary: str = "") -> None: ...
     async def begin_utterance(self) -> None: ...
     async def feed(self, pcm: bytes) -> None: ...
     async def end_utterance(self) -> None: ...
@@ -66,8 +66,8 @@ class ClaudeVoice:
         self._buffer = bytearray()
         self._turn: asyncio.Task | None = None
 
-    async def start(self, history: list[Turn]) -> None:
-        self._agent.seed_history(history)
+    async def start(self, history: list[Turn], summary: str = "") -> None:
+        self._agent.seed_history(history, summary)
 
     async def begin_utterance(self) -> None:
         await self.barge_in()

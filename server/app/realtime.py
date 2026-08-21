@@ -55,22 +55,30 @@ def _decode_and_resample(delta: str, src_rate: int, dst_rate: int) -> bytes:
     return resample_pcm16(base64.b64decode(delta), src_rate, dst_rate)
 
 
-def _build_instructions(history: list[Turn], notes: str = "") -> str:
-    """SYSTEM_PROMPT плюс краткий пересказ прошлого разговора, если он есть.
+def _build_instructions(history: list[Turn], notes: str = "", summary: str = "") -> str:
+    """SYSTEM_PROMPT плюс сводка и краткий пересказ прошлого разговора.
 
     Realtime API не даёт напрямую подсадить историю сообщений в сессию так
     же чисто, как в Chat Completions — конкретный формат текстовых элементов
     conversation.item для сообщений не задокументирован достаточно точно,
     чтобы полагаться на него. Пересказ в инструкциях надёжнее и не зависит
     от точной схемы API.
+
+    `summary` — то, что вытеснено из окна `history` и свёрнуто отдельной
+    моделью (app/memory_summary.py). `history` — только недавнее, дословно;
+    summary — то, что было раньше, но человек вправе ожидать, что колонка
+    это помнит.
     """
+    text = SYSTEM_PROMPT + notes
+    if summary:
+        text += f"\n\nО прошлых разговорах с этим человеком: {summary}"
     if not history:
-        return SYSTEM_PROMPT + notes
+        return text
     recap = "\n".join(
         f"{'Пользователь' if t.role == 'user' else 'Ты'}: {t.text}" for t in history
     )
     return (
-        f"{SYSTEM_PROMPT}{notes}\n\n"
+        f"{text}\n\n"
         "Ниже — последние реплики более раннего разговора с этим человеком, "
         "для контекста. Это не текущая реплика, отвечать на неё не нужно:\n"
         f"{recap}"
@@ -105,15 +113,17 @@ class RealtimeVoice:
         self._mic_batch = bytearray()
         self._batch_bytes = settings.mic_sample_rate * _SEND_BATCH_MS // 1000 * 2
         self._history: list[Turn] = []
+        self._summary = ""
         self._reconnecting = False
         self._refresh_task: asyncio.Task | None = None
 
-    async def start(self, history: list[Turn]) -> None:
+    async def start(self, history: list[Turn], summary: str = "") -> None:
         # Запоминаем для переподключения: OpenAI сама рвёт сессию через час
         # («Your session hit the maximum duration of 60 minutes» — не ошибка,
         # а объявленный лимит), и без повторного старта колонка навсегда
         # остаётся с мёртвым соединением — слушает команды, но не отвечает.
         self._history = history
+        self._summary = summary
         if self._refresh_task is not None:
             # Обновление таймера привязано к возрасту КОНКРЕТНОГО соединения —
             # старый отсчёт от предыдущего start() тут ни при чём.
@@ -123,7 +133,9 @@ class RealtimeVoice:
         await self._conn.session.update(
             session={
                 "type": "realtime",
-                "instructions": _build_instructions(history, notes_tool.as_instructions(self._settings.notes_dir)),
+                "instructions": _build_instructions(
+                    history, notes_tool.as_instructions(self._settings.notes_dir), summary
+                ),
                 "output_modalities": ["audio"],
                 "audio": {
                     "input": {
@@ -270,7 +282,7 @@ class RealtimeVoice:
         стороны это неотличимо от «не слышит».
         """
         try:
-            await self.start(self._history)
+            await self.start(self._history, self._summary)
             log.info("соединение с OpenAI Realtime восстановлено")
         except Exception:
             log.exception("не удалось переподключиться к OpenAI Realtime")
@@ -318,7 +330,7 @@ class RealtimeVoice:
             with contextlib.suppress(Exception):
                 await old_manager.__aexit__(None, None, None)
         try:
-            await self.start(self._history)
+            await self.start(self._history, self._summary)
             log.info("сессия Realtime обновлена заранее")
         except Exception:
             log.exception("не удалось обновить сессию Realtime заранее — дождусь штатного разрыва")

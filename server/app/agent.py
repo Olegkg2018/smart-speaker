@@ -63,6 +63,7 @@ class Agent:
         self._ctx = ctx
         self._client = AsyncAnthropic(api_key=settings.anthropic_api_key or None)
         self._history: list[dict[str, Any]] = []
+        self._summary = ""
 
     def _notes(self) -> str:
         """Постоянные заметки о доме — они живут дольше истории разговора."""
@@ -70,17 +71,27 @@ class Agent:
 
         return notes.as_instructions(self._settings.notes_dir)
 
+    def _summary_block(self) -> str:
+        if not self._summary:
+            return ""
+        return f"\n\nО прошлых разговорах с этим человеком: {self._summary}"
+
     def reset(self) -> None:
         self._history.clear()
 
-    def seed_history(self, turns: list[Turn]) -> None:
+    def seed_history(self, turns: list[Turn], summary: str = "") -> None:
         """Подсаживает сохранённый разговор при подключении колонки.
 
         Ответы ассистента из сохранённой истории — просто текст, без блоков
         tool_use: детали прошлых вызовов инструментов теряются, остаётся
         только смысл сказанного. Для голосового диалога этого достаточно.
+
+        `summary` — то, что вытеснено из окна `turns` и свёрнуто отдельной
+        моделью (app/memory_summary.py): без неё всё, что случилось раньше
+        последних `memory_turns` реплик, было бы забыто насовсем.
         """
         self._history = [{"role": t.role, "content": t.text} for t in turns]
+        self._summary = summary
         self._trim_history()
 
     async def respond(
@@ -121,7 +132,7 @@ class Agent:
             system=[
                 {
                     "type": "text",
-                    "text": SYSTEM_PROMPT + self._notes(),
+                    "text": SYSTEM_PROMPT + self._notes() + self._summary_block(),
                     # Промпт не меняется между запросами — пусть кэшируется,
                     # если дорастёт до минимального размера кэша.
                     "cache_control": {"type": "ephemeral"},

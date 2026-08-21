@@ -43,6 +43,14 @@ _REALTIME_RATE = 24_000
 # Копим пятую долю секунды и отправляем разом.
 _SEND_BATCH_MS = 200
 
+# OpenAI держит Realtime-сессию не дольше часа — объявленный лимит, не сбой
+# (см. _recv_loop и _proactive_refresh). Реактивного переподключения после
+# разрыва достаточно для правильности, но сам разрыв может прийтись ровно на
+# середину чьей-то фразы. Запас в две минуты даёт время обновиться заранее,
+# в паузе разговора, и разрыв никто не заметит вовсе.
+_SESSION_MAX_S = 60 * 60
+_REFRESH_MARGIN_S = 120
+
 def _decode_and_resample(delta: str, src_rate: int, dst_rate: int) -> bytes:
     return resample_pcm16(base64.b64decode(delta), src_rate, dst_rate)
 
@@ -98,6 +106,7 @@ class RealtimeVoice:
         self._batch_bytes = settings.mic_sample_rate * _SEND_BATCH_MS // 1000 * 2
         self._history: list[Turn] = []
         self._reconnecting = False
+        self._refresh_task: asyncio.Task | None = None
 
     async def start(self, history: list[Turn]) -> None:
         # Запоминаем для переподключения: OpenAI сама рвёт сессию через час
@@ -105,6 +114,10 @@ class RealtimeVoice:
         # а объявленный лимит), и без повторного старта колонка навсегда
         # остаётся с мёртвым соединением — слушает команды, но не отвечает.
         self._history = history
+        if self._refresh_task is not None:
+            # Обновление таймера привязано к возрасту КОНКРЕТНОГО соединения —
+            # старый отсчёт от предыдущего start() тут ни при чём.
+            self._refresh_task.cancel()
         self._manager = self._client.realtime.connect(model=self._settings.openai_realtime_model)
         self._conn = await self._manager.__aenter__()
         await self._conn.session.update(
@@ -137,6 +150,7 @@ class RealtimeVoice:
             }
         )
         self._recv_task = asyncio.create_task(self._recv_loop())
+        self._refresh_task = asyncio.create_task(self._proactive_refresh())
 
     async def begin_utterance(self) -> None:
         await self.barge_in()
@@ -193,6 +207,8 @@ class RealtimeVoice:
         # Не переподключаться после закрытия сессии — иначе разговор с уже
         # отключившейся колонкой продолжит держать соединение с OpenAI.
         self._reconnecting = True
+        if self._refresh_task is not None:
+            self._refresh_task.cancel()
         if self._recv_task is not None:
             self._recv_task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -223,18 +239,28 @@ class RealtimeVoice:
             raise
         except Exception as exc:
             # Соединение оборвалось (неверный ключ, сеть, квота) — исчерпав
-            # встроенные ретраи SDK, оно просто закрывается. Не даём сессии
-            # зависнуть в THINKING/SPEAKING навсегда: возвращаемся в IDLE и
-            # считаем соединение мёртвым, чтобы feed()/end_utterance() не
-            # пытались писать в закрытый сокет.
+            # встроенные ретраи SDK, оно просто закрывается.
             log.error("соединение с OpenAI Realtime оборвалось: %s", exc)
-            self._conn = None
-            self._speaking = False
-            with contextlib.suppress(Exception):
-                await self._cb.wait_drained()
-            await self._cb.turn_done()
-            if not self._reconnecting:
-                asyncio.create_task(self._reconnect())
+        else:
+            # SDK на штатном закрытии (ConnectionClosedOK — именно так
+            # закрывается сессия по истечении часа) просто завершает
+            # генератор без исключения: `async for` заканчивается сам, и
+            # это единственное место, где это видно. Ветка except её не
+            # ловит — соединение оставалось «живым» на бумаге, а по факту
+            # мёртвым: колонка слушала команды, но не отвечала.
+            log.warning("соединение с OpenAI Realtime закрылось штатно (истёк час)")
+
+        # Не даём сессии зависнуть в THINKING/SPEAKING навсегда: возвращаемся
+        # в IDLE и считаем соединение мёртвым, чтобы feed()/end_utterance()
+        # не пытались писать в закрытый сокет — независимо от того, было
+        # это исключение или тихое штатное закрытие выше.
+        self._conn = None
+        self._speaking = False
+        with contextlib.suppress(Exception):
+            await self._cb.wait_drained()
+        await self._cb.turn_done()
+        if not self._reconnecting:
+            asyncio.create_task(self._reconnect())
 
     async def _reconnect(self) -> None:
         """Поднимает сессию заново после разрыва — час OpenAI держит её сам.
@@ -250,6 +276,54 @@ class RealtimeVoice:
             log.exception("не удалось переподключиться к OpenAI Realtime")
             with contextlib.suppress(Exception):
                 await self._ctx.speak("Голосовой сервис пока недоступен.")
+
+    async def _proactive_refresh(self, delay_s: float | None = None) -> None:
+        """Обновляет сессию заранее, не дожидаясь принудительного разрыва.
+
+        Реактивный путь (`_recv_loop`) уже гарантирует правильность — он
+        подхватит разрыв в любом случае. Но сам разрыв ничего не знает про
+        разговор и может прийтись ровно на середину чьей-то фразы. Если
+        обновиться заранее, в паузе, этого не заметят вовсе.
+
+        `delay_s` параметризован ради тестов — в бою всегда берётся расчёт
+        по объявленному часовому лимиту OpenAI.
+        """
+        if delay_s is None:
+            delay_s = _SESSION_MAX_S - _REFRESH_MARGIN_S
+        await asyncio.sleep(delay_s)
+        if self._conn is None or self._reconnecting:
+            # Уже мертво или уже пересобирается — реактивный путь разберётся.
+            return
+        if self._speaking:
+            # Идёт озвучка ответа — прервать её было бы хуже, чем дождаться
+            # штатного разрыва. Идеального сигнала «сейчас точно пауза» нет:
+            # это лучшее доступное приближение, реактивный путь подстрахует.
+            log.info("сессия Realtime скоро истечёт, но сейчас говорит — обновлюсь по разрыву")
+            return
+
+        log.info("сессия Realtime скоро истечёт — обновляю заранее, в паузе разговора")
+        self._reconnecting = True
+        # Обнуляем сразу, а не после пересборки: feed()/end_utterance() уже
+        # проверяют "self._conn is None" и молча выходят — без этого они
+        # могли бы попасть в окно между отменой старого соединения и
+        # поднятием нового и упасть на закрывающемся сокете.
+        old_task, self._recv_task = self._recv_task, None
+        old_manager, self._manager = self._manager, None
+        self._conn = None
+        if old_task is not None:
+            old_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await old_task
+        if old_manager is not None:
+            with contextlib.suppress(Exception):
+                await old_manager.__aexit__(None, None, None)
+        try:
+            await self.start(self._history)
+            log.info("сессия Realtime обновлена заранее")
+        except Exception:
+            log.exception("не удалось обновить сессию Realtime заранее — дождусь штатного разрыва")
+        finally:
+            self._reconnecting = False
 
     async def _on_event(self, event) -> None:
         etype = event.type

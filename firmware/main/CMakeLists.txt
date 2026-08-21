@@ -6,6 +6,7 @@ idf_component_register(
         "audio_in.c"
         "audio_out.c"
         "audio_frontend.c"
+        "audio_opus.c"
         "button.c"
         "display.c"
         "led.c"
@@ -19,4 +20,5 @@ idf_component_register(
         json
         esp_websocket_client
         esp-sr
+        esp_audio_codec
 )

@@ -116,6 +116,9 @@ void app_main(void)
     ESP_ERROR_CHECK(happy_led_start());
     ESP_ERROR_CHECK(happy_display_start());
     ESP_ERROR_CHECK(happy_audio_out_start());
+    // Неудача не смертельна — send_hello() сам попросит PCM, если Opus не
+    // поднялся (нехватка памяти и т.п.), возврат нарочно не проверяем строго.
+    happy_opus_init();
     // Обработку поднимаем до микрофона: он сразу начнёт гнать через неё звук.
     ESP_ERROR_CHECK(happy_frontend_start(send_mic_frame, on_wake_word));
     ESP_ERROR_CHECK(happy_audio_in_start());

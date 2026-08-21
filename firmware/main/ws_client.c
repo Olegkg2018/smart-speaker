@@ -17,6 +17,10 @@ static const char *TAG = "ws";
 static esp_websocket_client_handle_t s_client;
 static volatile bool s_connected;
 static volatile happy_state_t s_state = HAPPY_STATE_IDLE;
+// Опрашивается в hello, подтверждается сервером в ready — активен только
+// когда обе стороны согласились. По умолчанию false: до подтверждения
+// безопаснее считать, что идёт PCM, как было раньше этой правки.
+static volatile bool s_codec_opus_active;
 
 // Сборка фрагментированных сообщений: esp_websocket_client отдаёт длинные
 // пакеты по частям, и тогда payload_offset > 0.
@@ -27,9 +31,10 @@ static void send_hello(void)
 {
     char hello[224];
     snprintf(hello, sizeof(hello),
-             "{\"t\":\"hello\",\"device\":\"%s\",\"fw\":\"0.1.0\",\"codec\":\"pcm\","
+             "{\"t\":\"hello\",\"device\":\"%s\",\"fw\":\"0.1.0\",\"codec\":\"%s\","
              "\"screen\":%s}",
              CONFIG_HAPPY_DEVICE_NAME,
+             happy_opus_available() ? "opus" : "pcm",
 #if CONFIG_HAPPY_SCREEN_ENABLED
              "true"
 #else
@@ -70,6 +75,15 @@ static void handle_text(const char *data, size_t len)
         if (s_state == HAPPY_STATE_IDLE) {
             happy_audio_out_flush();
         }
+    } else if (cJSON_IsString(type) && strcmp(type->valuestring, "ready") == 0) {
+        // Сервер подтверждает фактически выбранный кодек — не обязательно
+        // тот, что мы попросили в hello: без libopus сервер молча
+        // откатывается на PCM, и обе стороны должны узнать про это
+        // одинаково, иначе колонка кодирует, а сервер ждёт сырой звук.
+        const cJSON *codec = cJSON_GetObjectItemCaseSensitive(root, "codec");
+        s_codec_opus_active = happy_opus_available() && cJSON_IsString(codec) &&
+                               strcmp(codec->valuestring, "opus") == 0;
+        ESP_LOGI(TAG, "кодек согласован: %s", s_codec_opus_active ? "opus" : "pcm");
     }
     cJSON_Delete(root);
 }
@@ -81,7 +95,15 @@ static void handle_binary(const uint8_t *data, size_t len)
     }
     switch (data[0]) {
     case HAPPY_FRAME_SPEAKER:
-        happy_audio_out_push(data + 1, len - 1);
+        if (s_codec_opus_active) {
+            static int16_t pcm[HAPPY_SPK_FRAME_SAMPLES];
+            int samples = happy_opus_decode(data + 1, len - 1, pcm, HAPPY_SPK_FRAME_SAMPLES);
+            if (samples > 0) {
+                happy_audio_out_push((const uint8_t *)pcm, (size_t)samples * sizeof(int16_t));
+            }
+        } else {
+            happy_audio_out_push(data + 1, len - 1);
+        }
         break;
     case HAPPY_FRAME_SCREEN:
         happy_display_draw(data + 1, len - 1);
@@ -100,6 +122,8 @@ static void on_ws_event(void *arg, esp_event_base_t base, int32_t id, void *even
         ESP_LOGI(TAG, "соединение с сервером установлено");
         s_connected = true;
         s_assembly_len = 0;
+        s_codec_opus_active = false;  // до подтверждения сервером в ready
+        happy_opus_reset();
         send_hello();
         // Микрофон включит либо активационное слово, либо кнопка — слать
         // звук до этого некуда и незачем.
@@ -212,15 +236,11 @@ happy_state_t happy_ws_state(void)
     return s_state;
 }
 
-esp_err_t happy_ws_send_mic(const uint8_t *payload, size_t len)
+// Заголовок и данные должны уйти одним фреймом, поэтому склеиваем. Буфер
+// по размеру кадра эхоподавителя (512 сэмплов на ESP32-S3, не 320 у
+// микрофона) — Opus-пакет в него тоже помещается с большим запасом.
+static esp_err_t send_mic_raw(const uint8_t *payload, size_t len)
 {
-    if (!s_connected) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    // Заголовок и данные должны уйти одним фреймом, поэтому склеиваем.
-    // Размер кадра задаёт не микрофон, а эхоподавитель: он копит звук до
-    // своей длины (на ESP32-S3 это 512 сэмплов против 320 у микрофона).
-    // Буфер по размеру микрофонного кадра молча ронял бы такие посылки.
     static uint8_t frame[1 + HAPPY_MIC_MAX_FRAME_SAMPLES * 2];
     if (len + 1 > sizeof(frame)) {
         ESP_LOGW(TAG, "кадр микрофона не влез в буфер: %u байт", (unsigned)len);
@@ -231,6 +251,27 @@ esp_err_t happy_ws_send_mic(const uint8_t *payload, size_t len)
     int sent = esp_websocket_client_send_bin(s_client, (const char *)frame, len + 1,
                                              pdMS_TO_TICKS(100));
     return sent > 0 ? ESP_OK : ESP_FAIL;
+}
+
+static void emit_mic_packet(const uint8_t *packet, size_t len, void *ctx)
+{
+    (void)ctx;
+    send_mic_raw(packet, len);
+}
+
+esp_err_t happy_ws_send_mic(const uint8_t *payload, size_t len)
+{
+    if (!s_connected) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (s_codec_opus_active) {
+        // payload — сырой PCM s16le от эхоподавителя; кодируем перед
+        // отправкой. Кадр Opus не кратен кадру AFE, поэтому за один вызов
+        // может уйти 0, 1 или 2 пакета — happy_opus_encode копит остаток.
+        happy_opus_encode((const int16_t *)payload, len / sizeof(int16_t), emit_mic_packet, NULL);
+        return ESP_OK;
+    }
+    return send_mic_raw(payload, len);
 }
 
 esp_err_t happy_ws_send_json(const char *json)

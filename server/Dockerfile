@@ -6,10 +6,14 @@ FROM python:3.12-slim
 
 # ffmpeg декодирует музыку в PCM для микшера; DejaVu даёт кириллицу на экране
 # колонки — картинку рисует сервер, поэтому шрифт нужен именно здесь.
+# libopus0 — рантайм-библиотека для opuslib (ctypes-обёртка, не компилирует
+# ничего сама, но без .so падает импортом): без неё make_codec("opus", ...)
+# молча откатывается на PCM, а колонка так и не узнаёт о экономии трафика.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg \
         fonts-dejavu-core \
         ca-certificates \
+        libopus0 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -19,7 +23,7 @@ COPY app ./app
 
 # Кэш pip живёт между сборками: на четырёх Cortex-A55 повторная выкачка
 # трёхсот мегабайт колёс стоит несколько минут.
-RUN --mount=type=cache,target=/root/.cache/pip pip install --editable .
+RUN --mount=type=cache,target=/root/.cache/pip pip install --editable .[opus]
 
 # Замер скорости на живом железе — единственное, ради чего сюда попадает
 # каталог tools; на пересборку кода он не влияет.

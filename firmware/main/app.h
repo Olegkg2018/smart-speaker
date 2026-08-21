@@ -37,6 +37,23 @@ typedef enum {
 esp_err_t happy_wifi_start(void);
 void happy_wifi_wait_connected(void);
 
+// --- Opus ---
+// Экономит трафик в ~15 раз против сырого PCM (см. server/app/audio/codec.py).
+// Кодек согласуется в hello/ready — если сервер не поддерживает Opus
+// (например, не установлен libopus), обе стороны честно остаются на PCM.
+esp_err_t happy_opus_init(void);
+bool happy_opus_available(void);
+// Сбрасывает внутреннее состояние кодировщика/декодировщика и накопленный
+// остаток кадра — перед каждым новым соединением, чтобы не тащить огрызок
+// от прошлой сессии.
+void happy_opus_reset(void);
+typedef void (*happy_opus_emit_cb_t)(const uint8_t *packet, size_t len, void *ctx);
+// Кадр AFE (512 сэмплов) и кадр Opus (320 сэмплов = 20 мс) не кратны —
+// может отдать 0, 1 или 2 закодированных пакета за вызов.
+void happy_opus_encode(const int16_t *pcm, size_t samples, happy_opus_emit_cb_t emit, void *ctx);
+// Возвращает число сэмплов на выходе или -1 при ошибке.
+int happy_opus_decode(const uint8_t *packet, size_t packet_len, int16_t *pcm_out, size_t pcm_out_cap_samples);
+
 // --- WebSocket ---
 esp_err_t happy_ws_start(void);
 bool happy_ws_connected(void);

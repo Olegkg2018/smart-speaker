@@ -130,3 +130,23 @@ def test_search_matches_by_mood_tag(library, tmp_path):
 
 def test_search_without_index_returns_none(tmp_path):
     assert music_index.search(tmp_path, tmp_path / "no-index", "весёлая музыка") is None
+
+
+def test_search_does_not_confuse_similar_names(library, tmp_path):
+    """Живой случай: «Adele» находил «Quanto Tempo» — среди фитов трека был
+    другой артист, «Adela Jens», и на четырёх буквах «Adele»/«Adela»
+    совпадали стемом, хотя это разные имена."""
+    index_dir = tmp_path / "index"
+    music_index._save(
+        music_index.index_file_path(index_dir),
+        {
+            "Quanto Tempo.flac": music_index.TrackTags(
+                title="Quanto Tempo",
+                artist="Kungs, Victor Flash, Adela Jens",
+                tags="электронная",
+                mtime=0.0,
+            ),
+        },
+    )
+
+    assert music_index.search(library, index_dir, "Adele") is None

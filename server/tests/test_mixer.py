@@ -25,7 +25,13 @@ class ToneSource:
 
 
 def make_mixer(**kwargs) -> AudioMixer:
-    params = {"frame_samples": FRAME, "frame_ms": 20, "duck_level": 0.2, "volume": 1.0}
+    params = {
+        "frame_samples": FRAME,
+        "frame_ms": 20,
+        "duck_level": 0.2,
+        "listen_duck_level": 0.05,
+        "volume": 1.0,
+    }
     return AudioMixer(**(params | kwargs))
 
 
@@ -104,6 +110,49 @@ async def test_drop_speech_interrupts_reply():
     await mixer.push_speech(np.full(FRAME * 50, 5_000, dtype=np.int16).tobytes())
     await mixer.drop_speech()
     assert not mixer.is_speaking
+
+
+async def test_listening_ducks_music_harder_than_speech():
+    """Живой случай: эхоподавление на плате не вычитает громкую музыку
+    полностью, и колонка слышала обрывки играющей песни как реплику
+    пользователя — из-за этого невпопад крутила громкость. Пока идёт запись,
+    музыка должна уходить тише, чем во время собственной речи ассистента."""
+    mixer = make_mixer()
+    await mixer.set_music(ToneSource(level=10_000))
+    mixer.set_listening(True)
+
+    for _ in range(30):
+        await mixer.next_frame()
+    settled = np.frombuffer(await mixer.next_frame(), dtype=np.int16)[0]
+    assert settled == pytest.approx(10_000 * 0.05, abs=50)
+
+
+async def test_listening_stops_ducking_once_cleared():
+    mixer = make_mixer()
+    await mixer.set_music(ToneSource(level=10_000))
+    mixer.set_listening(True)
+    for _ in range(30):
+        await mixer.next_frame()
+    mixer.set_listening(False)
+
+    for _ in range(30):
+        await mixer.next_frame()
+    restored = np.frombuffer(await mixer.next_frame(), dtype=np.int16)[0]
+    assert restored == pytest.approx(10_000, abs=50)
+
+
+async def test_assistant_speech_ducks_more_than_listening():
+    """Пока ассистент говорит сам, приоритет — его duck_level, даже если
+    флаг прослушивания почему-то остался включён."""
+    mixer = make_mixer()
+    await mixer.set_music(ToneSource(level=10_000))
+    mixer.set_listening(True)
+    await mixer.push_speech(np.full(FRAME * 30, 1_000, dtype=np.int16).tobytes())
+
+    for _ in range(20):
+        await mixer.next_frame()
+    settled = np.frombuffer(await mixer.next_frame(), dtype=np.int16)[0]
+    assert settled == pytest.approx(10_000 * 0.2 + 1_000, abs=50)
 
 
 async def test_clipping_is_bounded():

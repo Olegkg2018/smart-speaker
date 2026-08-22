@@ -34,11 +34,14 @@ class AudioMixer:
         frame_samples: int,
         frame_ms: int,
         duck_level: float = 0.2,
+        listen_duck_level: float = 0.05,
         volume: float = 0.7,
     ):
         self.frame_samples = frame_samples
         self.volume = volume
         self._duck_level = duck_level
+        self._listen_duck_level = listen_duck_level
+        self._listening = False
         self._music: AudioSource | None = None
         self._pending_music: AudioSource | None = None
         self._music_paused = False
@@ -50,6 +53,15 @@ class AudioMixer:
         # к следующему пункту плейлиста.
         self.on_track_finished = None
         self._ramp_step = (1.0 - duck_level) / max(1, _RAMP_MS // frame_ms)
+
+    def set_listening(self, listening: bool) -> None:
+        """Идёт запись реплики — приглушить музыку сильнее, чем на время речи.
+
+        Эхоподавление на плате не вычитает громкую музыку полностью; чем
+        тише она играет во время записи, тем меньше её остатка долетает до
+        распознавания как будто бы это сказал человек.
+        """
+        self._listening = listening
 
     # ---------- речь ассистента ----------
 
@@ -115,8 +127,14 @@ class AudioMixer:
             await self._promote_pending_music()
         music = await self._take_music()
 
-        # Цель ducking: пока звучит речь, музыка уходит на задний план.
-        target = self._duck_level if speech is not None else 1.0
+        # Цель ducking: пока звучит речь ассистента — обычный duck, пока
+        # слушаем человека — приглушаем сильнее (см. set_listening).
+        if speech is not None:
+            target = self._duck_level
+        elif self._listening:
+            target = self._listen_duck_level
+        else:
+            target = 1.0
         self._gain = _approach(self._gain, target, self._ramp_step)
 
         mixed = np.zeros(self.frame_samples, dtype=np.float32)

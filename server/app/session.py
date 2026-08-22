@@ -77,6 +77,7 @@ class Session:
             frame_samples=settings.frame_samples_out,
             frame_ms=settings.frame_ms,
             duck_level=settings.duck_level,
+            listen_duck_level=settings.listen_duck_level,
             volume=settings.default_volume,
         )
         self._ctx = ToolContext(settings=settings, mixer=self._mixer, speak=self._announce)
@@ -373,12 +374,14 @@ class Session:
         self._vad.reset()
         self._listen_started = time.monotonic()
         self._recording = True
+        self._mixer.set_listening(True)
         await self._set_state(State.LISTENING)
 
     async def _stop_recording(self) -> None:
         if not self._recording:
             return
         self._recording = False
+        self._mixer.set_listening(False)
 
         # Пустую реплику отправлять нельзя. Модель получает шум, не находит
         # в нём команды — и отвечает по прошлому контексту: «включал музыку,
@@ -397,6 +400,7 @@ class Session:
         if not self._recording:
             return
         self._recording = False
+        self._mixer.set_listening(False)
         await self._voice.barge_in()
         await self._set_idle()
 

@@ -45,7 +45,7 @@ def _idle_session(heard_speech: bool, mic_bytes: int) -> Session:
     session._recording = True
     session._mic_bytes = mic_bytes
     session._voice = _FakeVoice()
-    session._mixer = types.SimpleNamespace(is_playing=False)
+    session._mixer = types.SimpleNamespace(is_playing=False, set_listening=lambda v: None)
     session._ws = _FakeWS()
     session._state = State.LISTENING
     session._screen = None

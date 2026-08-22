@@ -1,4 +1,5 @@
-from app.tools.news import _clean_title, _interleave
+import app.tools.telegram as telegram_module
+from app.tools.news import _HEADLINES, _TELEGRAM_SCAN_LIMIT, _clean_title, _collect_telegram, _interleave
 
 
 def test_strips_typography_read_aloud_literally():
@@ -44,3 +45,33 @@ def test_interleave_skips_empty_sources():
 
 def test_interleave_of_nothing():
     assert _interleave([[], []]) == []
+
+
+async def test_topic_search_scans_more_posts_than_it_shows(monkeypatch):
+    """Раньше фильтр по теме смотрел только на _HEADLINES последних постов —
+    если нужная новость не попадала в тройку самых свежих (частый случай:
+    событие уже не первым постом), поиск находил пусто, хотя новость была."""
+    seen_limits = []
+
+    async def fake_get_channel_posts(channel, limit):
+        seen_limits.append(limit)
+        return []
+
+    monkeypatch.setattr(telegram_module, "get_channel_posts", fake_get_channel_posts)
+
+    await _collect_telegram(["insiderUKR"], "Кривой Рог")
+    assert seen_limits == [_TELEGRAM_SCAN_LIMIT]
+    assert _TELEGRAM_SCAN_LIMIT > _HEADLINES
+
+
+async def test_no_topic_scans_only_headline_count(monkeypatch):
+    seen_limits = []
+
+    async def fake_get_channel_posts(channel, limit):
+        seen_limits.append(limit)
+        return []
+
+    monkeypatch.setattr(telegram_module, "get_channel_posts", fake_get_channel_posts)
+
+    await _collect_telegram(["insiderUKR"], None)
+    assert seen_limits == [_HEADLINES]

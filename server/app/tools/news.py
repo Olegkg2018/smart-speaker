@@ -9,6 +9,11 @@ import re
 log = logging.getLogger(__name__)
 
 _HEADLINES = 3
+# Сколько последних постов канала смотреть при поиске по теме: смотреть
+# только _HEADLINES было ошибкой — если ни один из трёх последних постов не
+# совпал, фильтр оставался ни с чем, даже если нужная новость есть на
+# несколько постов раньше (частый случай: событие уже не первым постом).
+_TELEGRAM_SCAN_LIMIT = 20
 _TAG_RE = re.compile(r"<[^>]+>")
 
 # Вёрстка заголовка, которую синтезатор читает буквально: «(!)» превращается
@@ -60,8 +65,11 @@ async def _nothing() -> list[str]:
 async def _collect_telegram(channels: list[str], topic: str | None) -> list[str]:
     from app.tools.telegram import get_channel_posts
 
+    # Без темы нужны только самые свежие посты; с темой — смотрим глубже,
+    # иначе фильтр ищет среди трёх последних, где нужного поста может не быть.
+    scan_limit = _TELEGRAM_SCAN_LIMIT if topic else _HEADLINES
     results = await asyncio.gather(
-        *(get_channel_posts(ch, _HEADLINES) for ch in channels), return_exceptions=True
+        *(get_channel_posts(ch, scan_limit) for ch in channels), return_exceptions=True
     )
     per_channel: list[list[str]] = []
     needle = topic.lower() if topic else None

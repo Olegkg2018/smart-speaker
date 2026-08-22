@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 
-from openai import AsyncOpenAI
+from app.openai_client import get as get_openai_client
 
 log = logging.getLogger(__name__)
 
@@ -29,11 +29,12 @@ async def web_search(api_key: str, model: str, query: str) -> str:
     if not query:
         return "Не расслышал, что искать."
 
-    client = AsyncOpenAI(api_key=api_key, timeout=_TIMEOUT_S)
+    client = get_openai_client(api_key)
     try:
         response = await client.responses.create(
             model=model,
             tools=[{"type": "web_search"}],
+            timeout=_TIMEOUT_S,
             # Ответ пойдёт в синтез речи, поэтому просим сразу пригодный для
             # произнесения текст: без ссылок, списков и разметки.
             input=(

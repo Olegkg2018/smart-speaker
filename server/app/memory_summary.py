@@ -13,9 +13,8 @@ from __future__ import annotations
 
 import logging
 
-from openai import AsyncOpenAI
-
 from app.memory import Turn
+from app.openai_client import get as get_openai_client
 
 log = logging.getLogger(__name__)
 
@@ -43,11 +42,12 @@ async def fold_in(api_key: str, model: str, prior_summary: str, evicted: list[Tu
         "как будто пишешь заметку самому себе перед следующим разговором. "
         "Ответь только текстом сводки, без пояснений и заголовков."
     )
-    client = AsyncOpenAI(api_key=api_key, timeout=_TIMEOUT_S)
+    client = get_openai_client(api_key)
     try:
         response = await client.chat.completions.create(
             model=model,
             messages=[{"role": "user", "content": prompt}],
+            timeout=_TIMEOUT_S,
         )
     except Exception as exc:
         log.warning("не удалось сжать память разговора: %s", exc)

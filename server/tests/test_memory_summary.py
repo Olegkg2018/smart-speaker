@@ -36,7 +36,9 @@ class _FakeClient:
 
 def _patch(monkeypatch, content="новая сводка"):
     captured: list = []
-    monkeypatch.setattr(memory_summary, "AsyncOpenAI", lambda *a, **kw: _FakeClient(content, captured))
+    monkeypatch.setattr(
+        memory_summary, "get_openai_client", lambda api_key: _FakeClient(content, captured)
+    )
     return captured
 
 
@@ -73,7 +75,7 @@ async def test_api_failure_keeps_prior_summary(monkeypatch):
     class _BrokenClient:
         chat = type("Chat", (), {"completions": _BrokenCompletions()})()
 
-    monkeypatch.setattr(memory_summary, "AsyncOpenAI", lambda *a, **kw: _BrokenClient())
+    monkeypatch.setattr(memory_summary, "get_openai_client", lambda api_key: _BrokenClient())
 
     result = await memory_summary.fold_in(
         "sk-test", "gpt-4o-mini", "старая сводка", [Turn("user", "привет")]

@@ -41,18 +41,20 @@ void happy_wifi_wait_connected(void);
 // Экономит трафик в ~15 раз против сырого PCM (см. server/app/audio/codec.py).
 // Кодек согласуется в hello/ready — если сервер не поддерживает Opus
 // (например, не установлен libopus), обе стороны честно остаются на PCM.
+// Само кодирование/декодирование живёт в своей задаче с низким приоритетом
+// (см. audio_opus.c) — синхронные вызовы из afe_fetch/ws-клиента роняли их
+// собственные тайминги. submit-функции только кладут данные в очередь и
+// сразу возвращаются; не ждут, что кадр обработается прямо сейчас.
 esp_err_t happy_opus_init(void);
 bool happy_opus_available(void);
 // Сбрасывает внутреннее состояние кодировщика/декодировщика и накопленный
 // остаток кадра — перед каждым новым соединением, чтобы не тащить огрызок
 // от прошлой сессии.
 void happy_opus_reset(void);
-typedef void (*happy_opus_emit_cb_t)(const uint8_t *packet, size_t len, void *ctx);
-// Кадр AFE (512 сэмплов) и кадр Opus (320 сэмплов = 20 мс) не кратны —
-// может отдать 0, 1 или 2 закодированных пакета за вызов.
-void happy_opus_encode(const int16_t *pcm, size_t samples, happy_opus_emit_cb_t emit, void *ctx);
-// Возвращает число сэмплов на выходе или -1 при ошибке.
-int happy_opus_decode(const uint8_t *packet, size_t packet_len, int16_t *pcm_out, size_t pcm_out_cap_samples);
+// Неблокирующая постановка сырых сэмплов микрофона в очередь на кодирование.
+void happy_opus_submit_encode(const int16_t *pcm, size_t samples);
+// Неблокирующая постановка принятого пакета в очередь на декодирование.
+void happy_opus_submit_decode(const uint8_t *packet, size_t packet_len);
 
 // --- WebSocket ---
 esp_err_t happy_ws_start(void);
@@ -61,6 +63,9 @@ bool happy_ws_connected(void);
 // перестать переподключаться, продолжая ругаться в лог.
 void happy_ws_restart(void);
 esp_err_t happy_ws_send_mic(const uint8_t *payload, size_t len);
+// Отправка уже готового кадра (сырой PCM или закодированный Opus-пакет) —
+// задача кодека зовёт это напрямую, когда закончит кодирование.
+esp_err_t happy_ws_send_mic_raw(const uint8_t *payload, size_t len);
 esp_err_t happy_ws_send_json(const char *json);
 happy_state_t happy_ws_state(void);
 

@@ -116,8 +116,10 @@ void app_main(void)
     ESP_ERROR_CHECK(happy_led_start());
     ESP_ERROR_CHECK(happy_display_start());
     ESP_ERROR_CHECK(happy_audio_out_start());
-    // Неудача не смертельна — send_hello() сам попросит PCM, если Opus не
-    // поднялся (нехватка памяти и т.п.), возврат нарочно не проверяем строго.
+    // Кодирование/декодирование Opus вынесено в свою задачу с низким
+    // приоритетом (audio_opus.c) — первая версия звала кодек синхронно из
+    // afe_fetch/websocket_task и валила их тайминги. Неудача не смертельна —
+    // send_hello() сам попросит PCM, если Opus не поднялся.
     happy_opus_init();
     // Обработку поднимаем до микрофона: он сразу начнёт гнать через неё звук.
     ESP_ERROR_CHECK(happy_frontend_start(send_mic_frame, on_wake_word));

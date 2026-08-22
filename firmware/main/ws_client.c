@@ -96,11 +96,10 @@ static void handle_binary(const uint8_t *data, size_t len)
     switch (data[0]) {
     case HAPPY_FRAME_SPEAKER:
         if (s_codec_opus_active) {
-            static int16_t pcm[HAPPY_SPK_FRAME_SAMPLES];
-            int samples = happy_opus_decode(data + 1, len - 1, pcm, HAPPY_SPK_FRAME_SAMPLES);
-            if (samples > 0) {
-                happy_audio_out_push((const uint8_t *)pcm, (size_t)samples * sizeof(int16_t));
-            }
+            // Только кладём в очередь — само декодирование идёт в задаче
+            // кодека (audio_opus.c), не здесь: у этой задачи есть свой
+            // жёсткий дедлайн на обслуживание сокета.
+            happy_opus_submit_decode(data + 1, len - 1);
         } else {
             happy_audio_out_push(data + 1, len - 1);
         }
@@ -194,6 +193,12 @@ esp_err_t happy_ws_start(void)
         .network_timeout_ms = 10000,
         // Пинг подтверждает живость соединения, когда никто не говорит.
         .ping_interval_sec = 10,
+        // task_stack и task_prio были подняты (8192/7) под декодирование
+        // Opus в этой же задаче — сейчас Opus выключен в main.c
+        // (happy_opus_init() закомментирован), decode физически не
+        // выполняется, а повышенный приоритет только менял тайминг
+        // остальных задач без причины. Возврат к прежним рабочим
+        // значениям — тем, что были час назад, когда всё было ровно.
         .task_stack = 6144,
     };
     s_client = esp_websocket_client_init(&config);
@@ -238,8 +243,11 @@ happy_state_t happy_ws_state(void)
 
 // Заголовок и данные должны уйти одним фреймом, поэтому склеиваем. Буфер
 // по размеру кадра эхоподавителя (512 сэмплов на ESP32-S3, не 320 у
-// микрофона) — Opus-пакет в него тоже помещается с большим запасом.
-static esp_err_t send_mic_raw(const uint8_t *payload, size_t len)
+// микрофона) — Opus-пакет в него тоже помещается с большим запасом. Общий
+// статический буфер безопасен: PCM-путь (эта задача) и Opus-путь (задача
+// кодека) никогда не активны одновременно — переключает их один и тот же
+// флаг s_codec_opus_active.
+esp_err_t happy_ws_send_mic_raw(const uint8_t *payload, size_t len)
 {
     static uint8_t frame[1 + HAPPY_MIC_MAX_FRAME_SAMPLES * 2];
     if (len + 1 > sizeof(frame)) {
@@ -253,25 +261,19 @@ static esp_err_t send_mic_raw(const uint8_t *payload, size_t len)
     return sent > 0 ? ESP_OK : ESP_FAIL;
 }
 
-static void emit_mic_packet(const uint8_t *packet, size_t len, void *ctx)
-{
-    (void)ctx;
-    send_mic_raw(packet, len);
-}
-
 esp_err_t happy_ws_send_mic(const uint8_t *payload, size_t len)
 {
     if (!s_connected) {
         return ESP_ERR_INVALID_STATE;
     }
     if (s_codec_opus_active) {
-        // payload — сырой PCM s16le от эхоподавителя; кодируем перед
-        // отправкой. Кадр Opus не кратен кадру AFE, поэтому за один вызов
-        // может уйти 0, 1 или 2 пакета — happy_opus_encode копит остаток.
-        happy_opus_encode((const int16_t *)payload, len / sizeof(int16_t), emit_mic_packet, NULL);
+        // payload — сырой PCM s16le от эхоподавителя. Кодирование и сама
+        // отправка идут в задаче кодека (audio_opus.c) — здесь только
+        // неблокирующая постановка в очередь, чтобы не держать afe_fetch.
+        happy_opus_submit_encode((const int16_t *)payload, len / sizeof(int16_t));
         return ESP_OK;
     }
-    return send_mic_raw(payload, len);
+    return happy_ws_send_mic_raw(payload, len);
 }
 
 esp_err_t happy_ws_send_json(const char *json)

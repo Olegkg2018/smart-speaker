@@ -19,6 +19,8 @@ from __future__ import annotations
 from fastapi import APIRouter
 from fastapi.responses import HTMLResponse
 
+from app.config import settings
+
 router = APIRouter()
 
 _PAGE = """<!doctype html>
@@ -55,9 +57,15 @@ _PAGE = """<!doctype html>
 
 <div class="hint" id="hint" hidden>
   <b>Микрофон недоступен.</b> Браузер открывает его только на защищённой
-  странице. На Android это лечится так: открой
+  странице.
+  <span id="hintAndroid">На Android это лечится так: открой
   <code>chrome://flags/#unsafely-treat-insecure-origin-as-secure</code>,
-  впиши туда адрес этой страницы, включи и перезапусти браузер.
+  впиши туда адрес этой страницы, включи и перезапусти браузер.</span>
+  <span id="hintIOS" hidden>На iPhone такого флага нет — там любой браузер,
+  включая Chrome, работает на системном WebKit, а не Chromium. Нужен
+  настоящий HTTPS: открой <code id="hintIOSUrl"></code> вместо этой
+  страницы (сертификат самоподписанный — один раз подтверди «всё равно
+  открыть»).</span>
 </div>
 
 <script>
@@ -81,7 +89,13 @@ async function start() {
     }});
   } catch (e) {
     show('Не дали микрофон: ' + e.name);
-    if (!window.isSecureContext) $('hint').hidden = false;
+    if (!window.isSecureContext) {
+      $('hint').hidden = false;
+      const isIOS = /iP(hone|ad|od)/.test(navigator.userAgent);
+      $('hintAndroid').hidden = isIOS;
+      $('hintIOS').hidden = !isIOS;
+      if (isIOS) $('hintIOSUrl').textContent = `https://${location.hostname}:__TLS_PORT__/satellite`;
+    }
     $('go').disabled = false;
     return;
   }
@@ -186,4 +200,4 @@ $('go').onclick = () => (running ? stop() : start());
 
 @router.get("/satellite", response_class=HTMLResponse)
 async def satellite() -> str:
-    return _PAGE
+    return _PAGE.replace("__TLS_PORT__", str(settings.tls_port))

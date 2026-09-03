@@ -256,29 +256,62 @@ async def stream(ws: WebSocket) -> None:
                 del _rooms[room]
 
 
+def _build_tls_app() -> FastAPI:
+    """Тот же /satellite и тот же /stream, но поверх HTTPS — для айфона.
+
+    Отдельный FastAPI-объект без своего lifespan: модели (stt/tts/screen)
+    грузит только основной `app`, и оба сервера в одном процессе делят те
+    же объекты через модульные переменные (`stream` использует те же
+    `_rooms`, `stt`, `tts`, что и обычный вход) — второй лишний прогон
+    lifespan здесь только загрузил бы модели заново и завёл вторую задачу
+    ночной переиндексации фонотеки.
+    """
+    tls_app = FastAPI(title="Happy Speaker (TLS)")
+    tls_app.include_router(satellite_page.router)
+    tls_app.add_api_websocket_route("/stream", stream)
+    return tls_app
+
+
 def main() -> None:
     import uvicorn
 
-    # Браузер отдаёт микрофон только на защищённой странице, поэтому для
-    # сателлита на телефоне может понадобиться HTTPS. Сертификат
-    # самоподписанный — браузер один раз поругается, дальше запомнит.
-    #
-    # Учти: TLS включается на весь сервер, и колонка со своим ws://
-    # отвалится. Либо перепрошивать её на wss://, либо оставить выключенным
-    # и разрешить незащищённый источник флагом в браузере телефона.
-    ssl_args = {}
+    # Пинг WebSocket, иначе полуоткрытое соединение висит бесконечно долго.
+    # Живой случай: колонка потеряла питание и переподключилась заново, но
+    # старый сокет не получил ни FIN, ни RST (роутер/NAT промолчал) — сервер
+    # без явной проверки живости держал бы его часами (стандартный TCP
+    # keepalive в Linux — 2 часа), а новое подключение того же устройства
+    # добавлялось вторым в ту же комнату. С пингом раз в 15 секунд мёртвый
+    # сокет закрывается сервером сам за 30 секунд без ответа.
+    ws_ping = {"ws_ping_interval": 15.0, "ws_ping_timeout": 15.0}
+
+    servers = [uvicorn.Server(uvicorn.Config(
+        app, host=settings.host, port=settings.port, log_level="warning", **ws_ping,
+    ))]
+
+    # Браузер открывает микрофон только на защищённой странице. На Android
+    # это обходится флагом браузера, на iOS (WebKit) такого флага нет —
+    # там работает только настоящий HTTPS. Поднимаем его вторым сервером,
+    # рядом с обычным: колонка как ходила по ws:// на port, так и ходит.
     if settings.tls_cert and settings.tls_key:
         cert, key = Path(settings.tls_cert), Path(settings.tls_key)
         if cert.exists() and key.exists():
-            ssl_args = {"ssl_certfile": str(cert), "ssl_keyfile": str(key)}
+            servers.append(uvicorn.Server(uvicorn.Config(
+                _build_tls_app(), host=settings.host, port=settings.tls_port,
+                ssl_certfile=str(cert), ssl_keyfile=str(key),
+                log_level="warning", **ws_ping,
+            )))
             log.warning(
-                "включён HTTPS на весь сервер: колонке теперь нужен wss://, "
-                "сателлит на https://<адрес>:%d/satellite", settings.port)
+                "HTTPS для сателлита на https://<адрес>:%d/satellite "
+                "(колонка по-прежнему на ws://<адрес>:%d)",
+                settings.tls_port, settings.port,
+            )
         else:
             log.warning("сертификат не найден (%s), поднимаюсь без HTTPS", cert)
 
-    uvicorn.run(app, host=settings.host, port=settings.port, log_level="warning",
-                **ssl_args)
+    async def _serve_all() -> None:
+        await asyncio.gather(*(s.serve() for s in servers))
+
+    asyncio.run(_serve_all())
 
 
 if __name__ == "__main__":

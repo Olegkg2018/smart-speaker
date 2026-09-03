@@ -5,8 +5,12 @@ services:
     container_name: happy-speaker
     restart: unless-stopped
     # 8080 на хосте уже занят, поэтому наружу колонка ходит через 8090.
+    # Второй порт — HTTPS для сателлита на телефоне (нужен на iPhone, см.
+    # TLS_CERT/TLS_KEY в .env); если сертификат не задан, порт просто не
+    # слушает — открывать его наружу можно всегда.
     ports:
       - "${HAPPY_PORT:-8090}:8080"
+      - "${HAPPY_TLS_PORT:-8443}:8443"
     env_file:
       - .env
     environment:

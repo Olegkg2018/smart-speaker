@@ -150,6 +150,13 @@ _PAGE = """<!doctype html>
   .when { font-variant-numeric: tabular-nums; font-weight: 600; }
   .sum { background: #8881; padding: 10px; border-radius: 8px;
          white-space: pre-wrap; }
+  .turns { max-height: 360px; overflow-y: auto; border: 1px solid var(--line);
+           border-radius: 8px; padding: 4px 10px; margin: 8px 0; }
+  .turn { padding: 6px 0; border-bottom: 1px solid var(--line); }
+  .turn:last-child { border-bottom: 0; }
+  .turn b { color: var(--muted); font-weight: 600; }
+  .turn.user b { color: #39f; }
+  .turn.assistant b { color: #3c6; }
 </style>
 <h1>Колонка</h1>
 <p class="sub">Что запланировано и что записано. Удалять — кнопкой справа.</p>
@@ -177,6 +184,14 @@ async function del(url) {
   const r = await fetch(url, {method: 'DELETE'});
   if (!r.ok) { alert('Не удалось удалить'); return; }
   load();
+}
+
+const ROLE_LABEL = {user: 'Вы', assistant: 'Колонка'};
+
+function turnsHtml(turns) {
+  if (!turns.length) return '<p class="empty">разговоров ещё не было</p>';
+  return '<div class="turns">' + turns.map(t => `<div class="turn ${esc(t.role)}">
+    <b>${esc(ROLE_LABEL[t.role] || t.role)}:</b> ${esc(t.text)}</div>`).join('') + '</div>';
 }
 
 function sumHtml(sum) {
@@ -218,6 +233,7 @@ async function load() {
     <h3>${esc(dev)}</h3>
     ${sumHtml(m.summary)}
     <p class="sub">реплик сохранено: ${m.turns.length}</p>
+    ${turnsHtml(m.turns)}
     <p><button onclick="if(confirm('Забыть разговор с «${esc(dev)}»?')) del('/api/memory/${encodeURIComponent(dev)}')">забыть всё</button></p>
   `).join('') || '<p class="empty">пусто</p>';
 }

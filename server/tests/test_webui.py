@@ -108,3 +108,12 @@ def test_memory_is_shown_and_can_be_forgotten(client):
     after = client.get("/api/memory").json()
     assert after["kitchen"]["turns"] == []
     assert not any(after["kitchen"]["summary"].values())
+
+
+def test_page_renders_the_conversation_itself_not_just_a_count(client):
+    """Раньше страница показывала только «реплик сохранено: N» — сам
+    разговор был виден только через API. Рендер на JS, поэтому здесь можно
+    проверить только то, что код для этого в странице есть."""
+    html = client.get("/").text
+    assert "turnsHtml" in html
+    assert "ROLE_LABEL" in html

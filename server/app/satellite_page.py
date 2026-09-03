@@ -41,6 +41,9 @@ _PAGE = """<!doctype html>
   button { font: inherit; padding: 14px 28px; border-radius: 10px;
            border: 0; background: #3c6; color: #000; font-weight: 600; }
   button:disabled { background: #333; color: #777; }
+  #talk { display: block; width: 100%; margin: 16px 0 0; padding: 22px;
+          font-size: 1.3rem; background: #39f; color: #fff; }
+  #talk.active { background: #f63; }
   .hint { color: #777; font-size: .85rem; text-align: left;
           background: #1a1a1a; padding: 12px; border-radius: 8px;
           margin-top: 24px; }
@@ -53,6 +56,7 @@ _PAGE = """<!doctype html>
 <div id="text"></div>
 <div id="meter"><div id="bar"></div></div>
 <button id="go">Слушать</button>
+<button id="talk" hidden>🎤 Спросить</button>
 <div id="err" class="err"></div>
 
 <div class="hint" id="hint" hidden>
@@ -112,6 +116,7 @@ async function start() {
     running = true;
     $('go').textContent = 'Остановить';
     $('go').disabled = false;
+    $('talk').hidden = false;
     show('');
   };
 
@@ -121,6 +126,11 @@ async function start() {
     if (m.t === 'state') {
       $('state').textContent = STATES[m.value] || m.value;
       if (m.value === 'idle' || m.value === 'listening') $('text').textContent = '';
+      // Слушаю — кнопка красная и подписана «Стоп»: повторный тап обрывает
+      // запись раньше тишины (тот же смысл, что у тапа физической кнопки).
+      const listening = m.value === 'listening';
+      $('talk').textContent = listening ? '⏹ Стоп' : '🎤 Спросить';
+      $('talk').classList.toggle('active', listening);
     }
   };
 
@@ -187,12 +197,23 @@ function stop(msg) {
   try { ws && ws.close(); } catch {}
   $('go').textContent = 'Слушать';
   $('go').disabled = false;
+  $('talk').hidden = true;
+  $('talk').classList.remove('active');
   $('state').textContent = '—';
   $('bar').style.width = '0';
   if (msg) show(msg);
 }
 
 $('go').onclick = () => (running ? stop() : start());
+
+// У сателлита нет активационного слова — это его и заменяет. Тот же
+// протокол, что у физической кнопки на колонке: "ptt" down — тап,
+// не удержание, конец реплики определяет сервер по тишине сам. Слать
+// можно с любого подключённого устройства, сервер не привязывает
+// команду к конкретному микрофону.
+$('talk').onclick = () => {
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify({t: 'ptt', state: 'down'}));
+};
 </script>
 </html>
 """

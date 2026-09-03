@@ -7,7 +7,7 @@
 
 static const char *TAG = "display";
 
-#if CONFIG_HAPPY_SCREEN_ENABLED
+#if CONFIG_HAPPY_SCREEN_ENABLED && !CONFIG_HAPPY_SCREEN_ST7789
 
 #define SSD1306_ADDR 0x3C
 #define SSD1306_CMD 0x00
@@ -118,10 +118,21 @@ void happy_display_clear(void)
     happy_display_draw(blank, sizeof(blank));
 }
 
-#else  // экран отключён в menuconfig
+void happy_display_show(happy_state_t s, const char *t, const char *p)
+{
+    // На SSD1306 картинку целиком рисует сервер и присылает битмапом,
+    // разбирать состояние и текст на плате незачем.
+    (void)s; (void)t; (void)p;
+}
+
+#elif !CONFIG_HAPPY_SCREEN_ST7789  // экрана нет вовсе
 
 esp_err_t happy_display_start(void) { return ESP_OK; }
 void happy_display_draw(const uint8_t *pages, size_t len) { (void)pages; (void)len; }
 void happy_display_clear(void) {}
+void happy_display_show(happy_state_t s, const char *t, const char *p)
+{
+    (void)s; (void)t; (void)p;
+}
 
 #endif

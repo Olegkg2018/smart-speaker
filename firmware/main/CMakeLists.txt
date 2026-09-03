@@ -7,8 +7,13 @@ idf_component_register(
         "audio_out.c"
         "audio_frontend.c"
         "audio_opus.c"
+        "audio_debug.c"
+        "wake_cache.c"
         "button.c"
         "display.c"
+        "display_st7789.c"
+        "font.c"
+        "font20.c"
         "led.c"
     INCLUDE_DIRS "."
     REQUIRES
@@ -21,4 +26,5 @@ idf_component_register(
         esp_websocket_client
         esp-sr
         esp_audio_codec
+        esp_lcd
 )

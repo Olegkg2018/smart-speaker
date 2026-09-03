@@ -75,6 +75,7 @@ static void handle_text(const char *data, size_t len)
         if (s_state == HAPPY_STATE_IDLE) {
             happy_audio_out_flush();
         }
+        happy_display_show(s_state, NULL, NULL);
     } else if (cJSON_IsString(type) && strcmp(type->valuestring, "ready") == 0) {
         // Сервер подтверждает фактически выбранный кодек — не обязательно
         // тот, что мы попросили в hello: без libopus сервер молча
@@ -84,6 +85,14 @@ static void handle_text(const char *data, size_t len)
         s_codec_opus_active = happy_opus_available() && cJSON_IsString(codec) &&
                                strcmp(codec->valuestring, "opus") == 0;
         ESP_LOGI(TAG, "кодек согласован: %s", s_codec_opus_active ? "opus" : "pcm");
+    } else if (cJSON_IsString(type) && strcmp(type->valuestring, "text") == 0 &&
+               cJSON_IsString(value)) {
+        // Цветной экран рисует сама плата, поэтому с сервера приходит
+        // короткая строка, а не готовый кадр: RGB565 240x320 весит около
+        // 150 КБ и пошёл бы по тому же каналу, что и звук каждые 20 мс.
+        const cJSON *playing = cJSON_GetObjectItemCaseSensitive(root, "playing");
+        happy_display_show(s_state, value->valuestring,
+                           cJSON_IsString(playing) ? playing->valuestring : NULL);
     }
     cJSON_Delete(root);
 }

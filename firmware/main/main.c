@@ -27,6 +27,9 @@ static void on_button(happy_button_t button, bool pressed)
         // ответа сервера — иначе первые слова после тапа потеряются.
         if (pressed) {
             happy_ws_send_json("{\"t\":\"ptt\",\"state\":\"down\"}");
+            // По кнопке начало реплики известно точно — накопленное до
+            // нажатия только добавит случайного фона.
+            happy_wake_cache_clear();
             happy_audio_in_set_recording(true);
         }
         break;
@@ -48,12 +51,25 @@ static void on_button(happy_button_t button, bool pressed)
 
 static void send_mic_frame(const int16_t *pcm, size_t samples)
 {
+    // Дубль на компьютер для прослушивания — до всех условий: интересно
+    // именно то, что слышит микрофон, а не то, что дошло до сервера.
+    happy_audio_debug_feed(pcm, samples);
+
     // Микрофон слушает непрерывно ради активационного слова, но в сеть
     // звук уходит только во время реплики: круглосуточный поток забивал
     // Wi-Fi и заставлял сервер считать то, что ему не нужно.
     if (happy_audio_in_is_recording()) {
         happy_ws_send_mic((const uint8_t *)pcm, samples * sizeof(int16_t));
+    } else {
+        // Пока не пишем — копим в кольцо. В момент активации накопленное
+        // уйдёт первым, иначе начало команды теряется.
+        happy_wake_cache_store(pcm, samples);
     }
+}
+
+static void send_cached_frame(const int16_t *pcm, size_t samples)
+{
+    happy_ws_send_mic((const uint8_t *)pcm, samples * sizeof(int16_t));
 }
 
 static void on_wake_word(void)
@@ -65,6 +81,14 @@ static void on_wake_word(void)
     // начать слушать или прервать текущий ответ.
     happy_ws_send_json("{\"t\":\"ptt\",\"state\":\"down\"}");
     happy_audio_in_set_recording(true);
+    // Сначала — то, что человек успел сказать до срабатывания WakeNet,
+    // и только потом живой поток. Порядок важен: иначе начало команды
+    // приедет после её продолжения.
+    size_t primed = happy_wake_cache_drain(send_cached_frame);
+    if (primed > 0) {
+        ESP_LOGI(TAG, "досланы %u мс звука до активационного слова",
+                 (unsigned)(primed * 1000 / HAPPY_MIC_SAMPLE_RATE));
+    }
 }
 
 // Сколько колонка терпит отсутствие связи, прежде чем перезагрузиться сама.
@@ -121,6 +145,8 @@ void app_main(void)
     // afe_fetch/websocket_task и валила их тайминги. Неудача не смертельна —
     // send_hello() сам попросит PCM, если Opus не поднялся.
     happy_opus_init();
+    ESP_ERROR_CHECK(happy_wake_cache_start());
+    ESP_ERROR_CHECK(happy_audio_debug_start());
     // Обработку поднимаем до микрофона: он сразу начнёт гнать через неё звук.
     ESP_ERROR_CHECK(happy_frontend_start(send_mic_frame, on_wake_word));
     ESP_ERROR_CHECK(happy_audio_in_start());

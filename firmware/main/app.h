@@ -103,11 +103,40 @@ void happy_frontend_set_wake_enabled(bool enabled);
 // размера, а результат отдаёт колбэком из своей задачи.
 void happy_frontend_process(const int16_t *mic, size_t samples);
 
+// --- буфер перед активационным словом ---
+// WakeNet сообщает о слове уже после того, как оно произнесено, поэтому
+// сказанное до срабатывания раньше пропадало: слитное «компьютер, включи
+// музыку» приходило на сервер как «ключи музыку». Микрофон пишется в
+// кольцо всегда, а в момент активации накопленное уходит первым.
+typedef void (*happy_wake_cache_cb_t)(const int16_t *pcm, size_t samples);
+
+esp_err_t happy_wake_cache_start(void);
+void happy_wake_cache_store(const int16_t *pcm, size_t samples);
+// Отдаёт накопленное кусками по кадру и очищает кольцо. Возвращает
+// сколько сэмплов отдано.
+size_t happy_wake_cache_drain(happy_wake_cache_cb_t on_chunk);
+void happy_wake_cache_clear(void);
+
+// --- отладка звука ---
+// Дублирует то, что слышит микрофон, по UDP: качество распознавания
+// иначе приходится оценивать по косвенным признакам вместо того, чтобы
+// просто послушать.
+esp_err_t happy_audio_debug_start(void);
+void happy_audio_debug_feed(const int16_t *pcm, size_t samples);
+
 // --- экран ---
-// Картинку целиком рисует сервер; прошивка только выводит готовый битмап.
+// Монохромный SSD1306: картинку целиком рисует сервер, прошивка выводит
+// готовый битмап. Цветной ST7789 рисует сама плата — там сервер шлёт лишь
+// состояние и короткую строку (happy_display_show), потому что кадр
+// RGB565 240x320 весит около 150 КБ и не пролезает в канал, которым
+// каждые 20 мс идёт звук.
 esp_err_t happy_display_start(void);
 void happy_display_draw(const uint8_t *pages, size_t len);
 void happy_display_clear(void);
+
+// Показать состояние и текст. NULL в text/playing — оставить прежнее,
+// чтобы смена состояния не стирала уже показанную реплику.
+void happy_display_show(happy_state_t state, const char *text, const char *playing);
 
 // --- светодиод ---
 // На плате стоит адресный WS2812, а не обычный: состояние показываем цветом.

@@ -66,6 +66,40 @@ menu "Happy Speaker"
 
     endmenu
 
+    menu "Диагностика"
+
+        config HAPPY_WAKE_CACHE_MS
+            int "Сколько звука копить до активационного слова, мс"
+            default 1000
+            help
+                WakeNet сообщает о слове уже после того, как оно
+                произнесено. Без этого буфера всё сказанное до
+                срабатывания терялось: слитное «компьютер, включи музыку»
+                приходило на сервер как «ключи музыку». Ноль — выключить.
+                Буфер живёт в PSRAM: секунда занимает 32 КБ.
+
+        config HAPPY_AUDIO_DEBUG
+            bool "Дублировать звук микрофона по UDP"
+            default n
+            help
+                Отправляет то, что слышит микрофон, на компьютер — можно
+                послушать и понять, доходит ли до распознавания голос или
+                эхо собственного динамика. Иначе это приходится угадывать
+                по расшифровкам. Поток сырой: PCM 16 бит, моно, 16 кГц.
+                Смотри tools/listen.py.
+
+        config HAPPY_AUDIO_DEBUG_HOST
+            string "Куда слать звук"
+            depends on HAPPY_AUDIO_DEBUG
+            default "192.168.2.112"
+
+        config HAPPY_AUDIO_DEBUG_PORT
+            int "Порт"
+            depends on HAPPY_AUDIO_DEBUG
+            default 9999
+
+    endmenu
+
     menu "Экран"
 
         config HAPPY_SCREEN_ENABLED
@@ -84,6 +118,63 @@ menu "Happy Speaker"
             int "I2C SCL"
             depends on HAPPY_SCREEN_ENABLED
             default 42
+
+        config HAPPY_SCREEN_ST7789
+            bool "Цветной TFT 240x320 (ST7789, SPI)"
+            default n
+            help
+                В отличие от SSD1306, картинку рисует сама плата: сервер шлёт
+                только состояние и короткую строку. Иначе никак — кадр RGB565
+                240x320 весит около 150 КБ против килобайта у монохромного,
+                и такой поток пошёл бы по тому же каналу, что и звук каждые
+                20 мс. Шрифт с кириллицей запечён в прошивку
+                (tools/make_font.py). Распиновка под гребёнку платы
+                XH-S3E-AI: наружу выведены только IO41/IO42 и UART-пины,
+                поэтому экран садится на них. Пять контактов из семи
+                попадают в разъём как есть, DC и RST отгибаются: DC на
+                TXD перемычкой, RST на 3V3 (сброс идёт командой).
+                TXD/RXD свободны — консоль у нас идёт по USB (ttyACM),
+                а не по UART.
+
+        config HAPPY_SCREEN_WIDTH
+            int "Ширина экрана"
+            depends on HAPPY_SCREEN_ST7789
+            default 240
+
+        config HAPPY_SCREEN_HEIGHT
+            int "Высота экрана"
+            depends on HAPPY_SCREEN_ST7789
+            default 320
+
+        config HAPPY_LCD_MOSI
+            int "TFT: MOSI (SDA)"
+            depends on HAPPY_SCREEN_ST7789
+            default 41
+
+        config HAPPY_LCD_CLK
+            int "TFT: CLK (SCL)"
+            depends on HAPPY_SCREEN_ST7789
+            default 42
+
+        config HAPPY_LCD_DC
+            int "TFT: DC"
+            depends on HAPPY_SCREEN_ST7789
+            default 43
+
+        config HAPPY_LCD_RST
+            int "TFT: RST"
+            depends on HAPPY_SCREEN_ST7789
+            default -1
+
+        config HAPPY_LCD_CS
+            int "TFT: CS"
+            depends on HAPPY_SCREEN_ST7789
+            default 44
+
+        config HAPPY_LCD_BACKLIGHT
+            int "TFT: подсветка BLK (-1 если подключена к питанию)"
+            depends on HAPPY_SCREEN_ST7789
+            default -1
 
     endmenu
 

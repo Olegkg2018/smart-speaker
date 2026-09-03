@@ -46,6 +46,12 @@ __BASE_CSS__
           border-radius: 16px; border: 0; font-size: 1.25rem; font-weight: 700;
           background: linear-gradient(135deg, var(--accent), var(--accent2)); color: #fff; }
   #talk.active { background: linear-gradient(135deg, #ff8a5c, var(--danger)); }
+  .vol { display: flex; align-items: center; gap: 12px; margin-top: 18px;
+         padding-top: 16px; border-top: 1px solid var(--line); }
+  .vol span:first-child { font-size: 1.2rem; }
+  .vol input[type=range] { flex: 1; accent-color: var(--accent); height: 20px; }
+  .vol .pct { min-width: 3.2em; text-align: right; font-variant-numeric: tabular-nums;
+              font-weight: 700; color: var(--muted); font-size: .88rem; }
   .hint { color: var(--muted); font-size: .85rem; text-align: left;
           background: var(--surface2); padding: 14px; border-radius: var(--radius-sm);
           margin-top: 18px; }
@@ -67,6 +73,13 @@ __NAV__
     <div id="meter"><div id="bar"></div></div>
     <button id="go">Слушать</button>
     <button id="talk" hidden>🎤 Спросить</button>
+
+    <div class="vol" id="volBox" hidden>
+      <span>🔉</span>
+      <input type="range" id="volSlider" min="0" max="100" value="70">
+      <span class="pct" id="volPct">70%</span>
+    </div>
+
     <div id="err" class="err"></div>
 
     <div class="hint" id="hint" hidden>
@@ -130,6 +143,7 @@ async function start() {
     $('go').textContent = 'Остановить';
     $('go').disabled = false;
     $('talk').hidden = false;
+    $('volBox').hidden = false;
     show('');
   };
 
@@ -144,6 +158,10 @@ async function start() {
       const listening = m.value === 'listening';
       $('talk').textContent = listening ? '⏹ Стоп' : '🎤 Спросить';
       $('talk').classList.toggle('active', listening);
+    } else if (m.t === 'volume' && !draggingVol) {
+      // Громкость может поменять и голос, и другое устройство в той же
+      // комнате — не перезаписываем ползунок, пока за него держит палец.
+      setVolDisplay(Math.round(m.value * 100));
     }
   };
 
@@ -212,6 +230,7 @@ function stop(msg) {
   $('go').disabled = false;
   $('talk').hidden = true;
   $('talk').classList.remove('active');
+  $('volBox').hidden = true;
   $('state').textContent = '—';
   $('bar').style.width = '0';
   if (msg) show(msg);
@@ -227,6 +246,32 @@ $('go').onclick = () => (running ? stop() : start());
 $('talk').onclick = () => {
   if (ws && ws.readyState === 1) ws.send(JSON.stringify({t: 'ptt', state: 'down'}));
 };
+
+// Громкость динамика самой колонки — не звука в телефоне, тут его и нет
+// (see mute-выход выше). Слать можно с любого устройства, сервер не
+// разбирает, откуда команда, и рассылает новое значение всем остальным.
+let draggingVol = false, volSendTimer = null;
+
+function setVolDisplay(pct) {
+  $('volSlider').value = pct;
+  $('volPct').textContent = pct + '%';
+}
+
+$('volSlider').addEventListener('pointerdown', () => { draggingVol = true; });
+['pointerup', 'pointercancel'].forEach(ev =>
+  $('volSlider').addEventListener(ev, () => { draggingVol = false; }));
+
+$('volSlider').addEventListener('input', () => {
+  const pct = Number($('volSlider').value);
+  $('volPct').textContent = pct + '%';
+  // Не долбим сокет на каждый пиксель протяжки — слышно и без этого.
+  clearTimeout(volSendTimer);
+  volSendTimer = setTimeout(() => {
+    if (ws && ws.readyState === 1) {
+      ws.send(JSON.stringify({t: 'volume', value: pct / 100}));
+    }
+  }, 80);
+});
 </script>
 </html>
 """

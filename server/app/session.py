@@ -293,10 +293,13 @@ class Session:
             await peer.ws.send_json({"t": "ready", "codec": peer.codec.name})
 
         if not peer.has_speaker:
-            # Сателлит только слушает: ни звука, ни громкости ему не нужно,
-            # и сессию он не поднимает — она уже живёт.
+            # Сателлит не играет звук сам, но громкость physической колонки
+            # можно регулировать с телефона — странице нужно текущее
+            # значение, чтобы показать ползунок сразу в верном положении.
+            # Сессию сателлит не поднимает — она уже живёт.
             with contextlib.suppress(Exception):
                 await peer.ws.send_json(state_msg(self._state))
+                await peer.ws.send_json(volume_msg(self._mixer.volume))
             return
 
         self._device = peer.device

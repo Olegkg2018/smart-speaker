@@ -9,6 +9,7 @@ RealtimeVoice в test_realtime.py: собираем голый объект и �
 
 import types
 
+from app.peers import ROLE_SATELLITE, Peer
 from app.protocol import State
 from app.session import Session
 
@@ -102,3 +103,23 @@ async def test_stop_recording_is_a_noop_when_not_recording():
 
     assert not session._voice.barge_in_called
     assert not session._voice.end_utterance_called
+
+
+async def test_satellite_hello_gets_current_volume():
+    """Сателлит не играет звук сам, но регулирует громкость physической
+    колонки с телефона — без этого сообщения ползунок на странице не
+    знает, с какого значения начинать."""
+    session = Session.__new__(Session)
+    session._settings = types.SimpleNamespace(mic_sample_rate=16_000, frame_samples_mic=320)
+    session._mixer = types.SimpleNamespace(volume=0.42)
+    session._state = State.IDLE
+
+    ws = _FakeWS()
+    peer = Peer(ws, device="phone", role=ROLE_SATELLITE, has_screen=False)
+
+    await session._on_hello(peer, {"codec": "pcm"})
+
+    kinds = [m["t"] for m in ws.sent_json]
+    assert "volume" in kinds
+    volume_msg = next(m for m in ws.sent_json if m["t"] == "volume")
+    assert volume_msg["value"] == 0.42

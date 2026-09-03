@@ -30,3 +30,10 @@ def test_page_links_back_to_management_page():
     html = _client().get("/satellite").text
     assert '<a class="here" href="/satellite">' in html
     assert 'href="/"' in html
+
+
+def test_page_has_a_volume_control_for_the_speaker():
+    html = _client().get("/satellite").text
+    assert 'id="volSlider"' in html
+    assert "t: 'volume'" in html or "t:'volume'" in html
+

@@ -38,25 +38,25 @@ class ConversationMemory:
 
     def _load(self) -> tuple[list[Turn], str]:
         if not self._path.exists():
-            return [], ""
+            return [], {}
         try:
             raw = json.loads(self._path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError) as exc:
             log.warning("не удалось прочитать память «%s»: %s", self._path, exc)
-            return [], ""
+            return [], {}
 
         # Старый формат файла — голый список реплик, без сводки. Файлы,
         # записанные до этой правки, читать нужно как и раньше.
         if isinstance(raw, list):
-            turns_data, summary = raw, ""
+            turns_data, summary = raw, {}
         else:
-            turns_data, summary = raw.get("turns", []), raw.get("summary", "")
+            turns_data, summary = raw.get("turns", []), raw.get("summary", {})
 
         try:
             turns = [Turn(role=t["role"], text=t["text"]) for t in turns_data][-self._limit :]
         except (KeyError, TypeError) as exc:
             log.warning("не удалось прочитать память «%s»: %s", self._path, exc)
-            return [], ""
+            return [], {}
         return turns, summary
 
     @property
@@ -64,7 +64,12 @@ class ConversationMemory:
         return list(self._turns)
 
     @property
-    def summary(self) -> str:
+    def summary(self):
+        """Сводка прошлых разговоров — поля, а не проза.
+
+        Старые файлы хранят её строкой; приводит к схеме memory_summary,
+        сюда эта логика не тащится — memory.py не знает про модели.
+        """
         return self._summary
 
     def append(self, role: str, text: str) -> list[Turn]:
@@ -80,7 +85,7 @@ class ConversationMemory:
         self._save()
         return evicted
 
-    def set_summary(self, summary: str) -> None:
+    def set_summary(self, summary) -> None:
         self._summary = summary
         self._save()
 

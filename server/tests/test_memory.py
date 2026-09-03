@@ -6,7 +6,8 @@ from app.memory import ConversationMemory
 def test_empty_when_no_file(tmp_path):
     mem = ConversationMemory(tmp_path, "kitchen", limit=20)
     assert mem.turns == []
-    assert mem.summary == ""
+    # Сводка теперь поля, а не строка: пустая — пустой объект.
+    assert not mem.summary
 
 
 def test_append_and_reload_roundtrip(tmp_path):
@@ -62,7 +63,7 @@ def test_old_plain_list_format_still_loads(tmp_path):
     )
     mem = ConversationMemory(tmp_path, "kitchen", limit=20)
     assert [t.text for t in mem.turns] == ["привет"]
-    assert mem.summary == ""
+    assert not mem.summary
 
 
 def test_devices_are_isolated(tmp_path):

@@ -203,7 +203,7 @@ Piper RTF 0.57, Silero v3 RTF ~0.9 после прогрева. Прогрев S
 ## Тесты
 
 ```bash
-cd server && python3 -m pytest    # 218 тестов
+cd server && python3 -m pytest    # 221 тестов
 ```
 
 Запускать именно из `server/`: в корне не подхватывается `asyncio_mode`

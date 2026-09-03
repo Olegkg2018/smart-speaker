@@ -19,7 +19,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
-from app import memory_summary
+from app import memory_summary, webstyle
 from app.config import settings
 from app.tools import alarms as alarms_tool
 from app.tools import lists as lists_tool
@@ -132,48 +132,55 @@ _PAGE = """<!doctype html>
 <meta charset="utf-8">
 <title>Колонка</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🔊</text></svg>">
 <style>
-  :root { color-scheme: light dark; --line: #8883; --muted: #8889; }
-  body { font: 16px/1.5 system-ui, sans-serif; margin: 0 auto; padding: 16px;
-         max-width: 760px; }
-  h1 { font-size: 1.3rem; margin: 0 0 4px; }
-  h2 { font-size: 1.05rem; margin: 28px 0 8px; }
-  .sub { color: var(--muted); margin: 0 0 8px; font-size: .9rem; }
-  table { width: 100%; border-collapse: collapse; }
-  td { padding: 8px 4px; border-bottom: 1px solid var(--line); vertical-align: top; }
-  td.act { width: 1%; white-space: nowrap; text-align: right; }
-  button { font: inherit; cursor: pointer; border: 1px solid var(--line);
-           background: transparent; color: inherit; border-radius: 6px;
-           padding: 3px 10px; }
-  button:hover { border-color: currentColor; }
-  .empty { color: var(--muted); font-style: italic; padding: 8px 4px; }
-  .when { font-variant-numeric: tabular-nums; font-weight: 600; }
-  .sum { background: #8881; padding: 10px; border-radius: 8px;
-         white-space: pre-wrap; }
-  .turns { max-height: 360px; overflow-y: auto; border: 1px solid var(--line);
-           border-radius: 8px; padding: 4px 10px; margin: 8px 0; }
-  .turn { padding: 6px 0; border-bottom: 1px solid var(--line); }
+__BASE_CSS__
+  .sum { background: var(--surface2); padding: 12px 14px; border-radius: var(--radius-sm);
+         white-space: pre-wrap; font-size: .9rem; margin-bottom: 12px; }
+  .turns { max-height: 340px; overflow-y: auto; border: 1px solid var(--line);
+           border-radius: var(--radius-sm); padding: 4px 14px; margin: 10px 0; }
+  .turn { padding: 8px 0; border-bottom: 1px solid var(--line); font-size: .92rem; }
   .turn:last-child { border-bottom: 0; }
-  .turn b { color: var(--muted); font-weight: 600; }
-  .turn.user b { color: #39f; }
-  .turn.assistant b { color: #3c6; }
+  .turn b { color: var(--muted); font-weight: 700; }
+  .turn.user b { color: var(--accent); }
+  .turn.assistant b { color: var(--good); }
+  .device-head { display: flex; align-items: center; justify-content: space-between;
+                 margin: 18px 0 8px; }
+  .device-head:first-child { margin-top: 0; }
+  .device-head b { font-size: .95rem; }
 </style>
-<h1>Колонка</h1>
-<p class="sub">Что запланировано и что записано. Удалять — кнопкой справа.</p>
 
-<h2>Будильники</h2>
-<div id="alarms"></div>
+__NAV__
+<div class="wrap">
 
-<h2>Списки</h2>
-<div id="lists"></div>
+  <div class="hero">
+    <h1>Управление колонкой</h1>
+    <p>Что запланировано и что записано. Голосом это ставится одной фразой — убрать лишнее можно здесь.</p>
+  </div>
 
-<h2>Заметки</h2>
-<p class="sub">Это колонка держит в голове постоянно, в каждом разговоре.</p>
-<div id="notes"></div>
+  <div class="card">
+    <h2>⏰ Будильники</h2>
+    <div id="alarms"></div>
+  </div>
 
-<h2>Память разговоров</h2>
-<p class="sub">Если колонка отвечает невпопад — обычно сюда попал мусор от ослышки.</p>
-<div id="memory"></div>
+  <div class="card">
+    <h2>📋 Списки</h2>
+    <div id="lists"></div>
+  </div>
+
+  <div class="card">
+    <h2>📝 Заметки</h2>
+    <p class="hint">Это колонка держит в голове постоянно, в каждом разговоре.</p>
+    <div id="notes"></div>
+  </div>
+
+  <div class="card">
+    <h2>🧠 Память разговоров</h2>
+    <p class="hint">Если колонка отвечает невпопад — обычно сюда попал мусор от ослышки.</p>
+    <div id="memory"></div>
+  </div>
+
+</div>
 
 <script>
 const $ = (id) => document.getElementById(id);
@@ -216,25 +223,24 @@ async function load() {
     <td><span class="when">${esc(a.at.replace('T',' ').slice(0,16))}</span>
         ${a.label ? ' — ' + esc(a.label) : ''}
         ${a.sound ? ' <span class="sub">(' + esc(a.sound) + ')</span>' : ''}</td>
-    <td class="act"><button onclick="del('/api/alarms/${encodeURIComponent(a.id)}')">убрать</button></td>
+    <td class="act"><button class="danger" onclick="del('/api/alarms/${encodeURIComponent(a.id)}')">убрать</button></td>
   </tr>`);
 
   const names = Object.keys(lists);
   $('lists').innerHTML = names.length ? names.map(n => `<h3>${esc(n)}</h3>` +
     rows(lists[n], i => `<tr><td>${esc(i)}</td><td class="act">
-      <button onclick="del('/api/lists/${encodeURIComponent(n)}?item=${encodeURIComponent(i)}')">убрать</button>
+      <button class="danger" onclick="del('/api/lists/${encodeURIComponent(n)}?item=${encodeURIComponent(i)}')">убрать</button>
     </td></tr>`)).join('') : '<p class="empty">пусто</p>';
 
   $('notes').innerHTML = rows(notes, n => `<tr><td>${esc(n)}</td><td class="act">
-    <button onclick="del('/api/notes?text=${encodeURIComponent(n)}')">убрать</button>
+    <button class="danger" onclick="del('/api/notes?text=${encodeURIComponent(n)}')">убрать</button>
   </td></tr>`);
 
   $('memory').innerHTML = Object.entries(memory).map(([dev, m]) => `
-    <h3>${esc(dev)}</h3>
+    <div class="device-head"><b>${esc(dev)}</b><span class="badge">реплик: ${m.turns.length}</span></div>
     ${sumHtml(m.summary)}
-    <p class="sub">реплик сохранено: ${m.turns.length}</p>
     ${turnsHtml(m.turns)}
-    <p><button onclick="if(confirm('Забыть разговор с «${esc(dev)}»?')) del('/api/memory/${encodeURIComponent(dev)}')">забыть всё</button></p>
+    <p><button class="danger" onclick="if(confirm('Забыть разговор с «${esc(dev)}»?')) del('/api/memory/${encodeURIComponent(dev)}')">забыть всё</button></p>
   `).join('') || '<p class="empty">пусто</p>';
 }
 
@@ -247,4 +253,4 @@ setInterval(load, 15000);
 
 @router.get("/", response_class=HTMLResponse)
 async def index() -> str:
-    return _PAGE
+    return _PAGE.replace("__BASE_CSS__", webstyle.BASE_CSS).replace("__NAV__", webstyle.nav("home"))

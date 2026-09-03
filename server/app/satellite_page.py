@@ -19,6 +19,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 from fastapi.responses import HTMLResponse
 
+from app import webstyle
 from app.config import settings
 
 router = APIRouter()
@@ -28,48 +29,60 @@ _PAGE = """<!doctype html>
 <meta charset="utf-8">
 <title>Сателлит</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>📡</text></svg>">
 <style>
-  :root { color-scheme: dark; }
-  body { font: 16px/1.5 system-ui, sans-serif; margin: 0; padding: 20px;
-         background: #111; color: #eee; text-align: center; }
-  h1 { font-size: 1.2rem; font-weight: 500; margin: 0 0 20px; color: #999; }
-  #state { font-size: 2rem; margin: 24px 0 8px; min-height: 2.4rem; }
-  #text { color: #bbb; min-height: 3rem; margin-bottom: 20px; }
-  #meter { height: 14px; background: #222; border-radius: 7px;
-           overflow: hidden; margin: 20px 0; }
-  #bar { height: 100%; width: 0; background: #3c6; transition: width .1s; }
-  button { font: inherit; padding: 14px 28px; border-radius: 10px;
-           border: 0; background: #3c6; color: #000; font-weight: 600; }
-  button:disabled { background: #333; color: #777; }
-  #talk { display: block; width: 100%; margin: 16px 0 0; padding: 22px;
-          font-size: 1.3rem; background: #39f; color: #fff; }
-  #talk.active { background: #f63; }
-  .hint { color: #777; font-size: .85rem; text-align: left;
-          background: #1a1a1a; padding: 12px; border-radius: 8px;
-          margin-top: 24px; }
-  code { color: #9cf; word-break: break-all; }
-  .err { color: #f77; }
+__BASE_CSS__
+  .panel { text-align: center; }
+  #state { font-size: 1.9rem; font-weight: 700; margin: 6px 0 4px; min-height: 2.3rem; }
+  #text { color: var(--muted); min-height: 2.6rem; font-size: .95rem; }
+  #meter { height: 12px; background: var(--surface2); border-radius: 7px;
+           overflow: hidden; margin: 18px 0; }
+  #bar { height: 100%; width: 0; background: linear-gradient(90deg, var(--good), var(--accent));
+         transition: width .1s; }
+  #go { width: 100%; padding: 15px; border-radius: 14px; border: 0;
+        background: var(--surface2); color: var(--text); font-weight: 700; font-size: 1rem; }
+  #go:disabled { opacity: .5; }
+  #talk { display: block; width: 100%; margin: 12px 0 0; padding: 22px;
+          border-radius: 16px; border: 0; font-size: 1.25rem; font-weight: 700;
+          background: linear-gradient(135deg, var(--accent), var(--accent2)); color: #fff; }
+  #talk.active { background: linear-gradient(135deg, #ff8a5c, var(--danger)); }
+  .hint { color: var(--muted); font-size: .85rem; text-align: left;
+          background: var(--surface2); padding: 14px; border-radius: var(--radius-sm);
+          margin-top: 18px; }
+  code { color: var(--accent); word-break: break-all; }
+  .err { color: var(--danger); min-height: 1.2em; margin-top: 10px; font-size: .9rem; }
 </style>
 
-<h1>Сателлит колонки</h1>
-<div id="state">—</div>
-<div id="text"></div>
-<div id="meter"><div id="bar"></div></div>
-<button id="go">Слушать</button>
-<button id="talk" hidden>🎤 Спросить</button>
-<div id="err" class="err"></div>
+__NAV__
+<div class="wrap">
 
-<div class="hint" id="hint" hidden>
-  <b>Микрофон недоступен.</b> Браузер открывает его только на защищённой
-  странице.
-  <span id="hintAndroid">На Android это лечится так: открой
-  <code>chrome://flags/#unsafely-treat-insecure-origin-as-secure</code>,
-  впиши туда адрес этой страницы, включи и перезапусти браузер.</span>
-  <span id="hintIOS" hidden>На iPhone такого флага нет — там любой браузер,
-  включая Chrome, работает на системном WebKit, а не Chromium. Нужен
-  настоящий HTTPS: открой <code id="hintIOSUrl"></code> вместо этой
-  страницы (сертификат самоподписанный — один раз подтверди «всё равно
-  открыть»).</span>
+  <div class="hero">
+    <h1>Сателлит</h1>
+    <p>Ещё один микрофон для той же колонки — разговор, память и ответ общие.</p>
+  </div>
+
+  <div class="card panel">
+    <div id="state">—</div>
+    <div id="text"></div>
+    <div id="meter"><div id="bar"></div></div>
+    <button id="go">Слушать</button>
+    <button id="talk" hidden>🎤 Спросить</button>
+    <div id="err" class="err"></div>
+
+    <div class="hint" id="hint" hidden>
+      <b>Микрофон недоступен.</b> Браузер открывает его только на защищённой
+      странице.
+      <span id="hintAndroid">На Android это лечится так: открой
+      <code>chrome://flags/#unsafely-treat-insecure-origin-as-secure</code>,
+      впиши туда адрес этой страницы, включи и перезапусти браузер.</span>
+      <span id="hintIOS" hidden>На iPhone такого флага нет — там любой браузер,
+      включая Chrome, работает на системном WebKit, а не Chromium. Нужен
+      настоящий HTTPS: открой <code id="hintIOSUrl"></code> вместо этой
+      страницы (сертификат самоподписанный — один раз подтверди «всё равно
+      открыть»).</span>
+    </div>
+  </div>
+
 </div>
 
 <script>
@@ -221,4 +234,8 @@ $('talk').onclick = () => {
 
 @router.get("/satellite", response_class=HTMLResponse)
 async def satellite() -> str:
-    return _PAGE.replace("__TLS_PORT__", str(settings.tls_port))
+    return (
+        _PAGE.replace("__TLS_PORT__", str(settings.tls_port))
+        .replace("__BASE_CSS__", webstyle.BASE_CSS)
+        .replace("__NAV__", webstyle.nav("satellite"))
+    )

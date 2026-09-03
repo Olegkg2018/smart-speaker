@@ -35,6 +35,17 @@ def test_page_opens(client):
     assert "Будильники" in r.text
 
 
+def test_page_links_to_satellite_and_has_no_leftover_placeholders(client):
+    """Общий вид (webstyle) подставляется через .replace() — если имя
+    плейсхолдера когда-нибудь разъедется между файлами, он останется в
+    HTML как есть и будет виден пользователю."""
+    html = client.get("/").text
+    assert "__BASE_CSS__" not in html
+    assert "__NAV__" not in html
+    assert '<a class="here" href="/">' in html
+    assert 'href="/satellite"' in html
+
+
 def test_empty_sections_do_not_break(client):
     for path in ("/api/alarms", "/api/notes"):
         assert client.get(path).json() == []

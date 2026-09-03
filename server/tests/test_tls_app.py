@@ -38,3 +38,14 @@ def test_tls_app_reuses_the_same_stream_handler():
     tls_app = _build_tls_app()
     routes = {r.path: r for r in tls_app.routes if getattr(r, "path", None) == "/stream"}
     assert routes["/stream"].endpoint is stream
+
+
+def test_tls_app_also_serves_the_management_page():
+    """Со страницы сателлита есть ссылка "Управление" на "/" — без этого
+    роута на HTTPS-порту она упиралась в стандартный 404 FastAPI (JSON),
+    и браузер вместо страницы предлагал скачать файл."""
+    tls_app = _build_tls_app()
+    client = TestClient(tls_app)
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/html")

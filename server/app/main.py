@@ -257,7 +257,7 @@ async def stream(ws: WebSocket) -> None:
 
 
 def _build_tls_app() -> FastAPI:
-    """Тот же /satellite и тот же /stream, но поверх HTTPS — для айфона.
+    """Тот же /satellite, /stream и /, но поверх HTTPS — для айфона.
 
     Отдельный FastAPI-объект без своего lifespan: модели (stt/tts/screen)
     грузит только основной `app`, и оба сервера в одном процессе делят те
@@ -265,8 +265,15 @@ def _build_tls_app() -> FastAPI:
     `_rooms`, `stt`, `tts`, что и обычный вход) — второй лишний прогон
     lifespan здесь только загрузил бы модели заново и завёл вторую задачу
     ночной переиндексации фонотеки.
+
+    `webui.router` подключён по той же причине, что и `satellite_page`:
+    у него нет своего состояния, только чтение/запись файлов из settings.
+    Без него навигация "Управление" на странице сателлита при заходе по
+    HTTPS упиралась в 404 — а стандартный ответ FastAPI на 404 приходит
+    как JSON, и браузер вместо страницы предлагает скачать файл.
     """
     tls_app = FastAPI(title="Happy Speaker (TLS)")
+    tls_app.include_router(webui.router)
     tls_app.include_router(satellite_page.router)
     tls_app.add_api_websocket_route("/stream", stream)
     return tls_app

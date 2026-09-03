@@ -46,7 +46,11 @@ def _idle_session(heard_speech: bool, mic_bytes: int) -> Session:
     session._mic_bytes = mic_bytes
     session._voice = _FakeVoice()
     session._mixer = types.SimpleNamespace(is_playing=False, set_listening=lambda v: None)
-    session._ws = _FakeWS()
+    # Устройств в сессии может быть несколько; здесь проверяется путь
+    # с одним, поэтому набор пиров — заглушка.
+    session._peers = types.SimpleNamespace(
+        release_active=lambda: None, all=lambda: [], screens=lambda: []
+    )
     session._state = State.LISTENING
     session._screen = None
     session._screen_text = ""

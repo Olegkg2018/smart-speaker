@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
+from pathlib import Path
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 
@@ -13,6 +15,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from app.audio import music_index
 from app.cloud_speech import CloudSpeechToText, CloudTextToSpeech
 from app.config import settings
+from app import satellite_page, webui
 from app.screen import ScreenRenderer
 from app.session import Session
 from app.stt import SpeechToText
@@ -157,6 +160,13 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title="Happy Speaker", lifespan=lifespan)
 
+# Страница управления: посмотреть будильники, списки, заметки и
+# память, убрать лишнее. Голосом всё это ставится, но не смотрится.
+app.include_router(webui.router)
+# Сателлит для телефона: страница, а не приложение — Android SDK ради
+# проверки идеи не нужен, а браузер даёт аппаратное эхоподавление.
+app.include_router(satellite_page.router)
+
 
 @app.get("/health")
 async def health() -> dict[str, object]:
@@ -205,28 +215,70 @@ def model_name() -> str:
     return settings.model
 
 
+# Одна сессия на комнату: колонка и телефон рядом — это два микрофона
+# одного ассистента, а не два ассистента. Разговор, память и ответ общие,
+# слушает тот, кто слышит громче.
+_rooms: dict[str, Session] = {}
+_rooms_lock = asyncio.Lock()
+
+
 @app.websocket("/stream")
 async def stream(ws: WebSocket) -> None:
     await ws.accept()
-    session = Session(
-        ws,
-        settings,
-        stt,
-        tts,
-        screen if settings.screen_enabled else None,
-    )
+
+    # Комнату и роль знаем только из hello, поэтому читаем его здесь, до
+    # того как решать, к какой сессии присоединять.
     try:
-        await session.run()
+        hello = json.loads(await ws.receive_text())
+    except Exception:
+        log.warning("устройство не представилось — закрываю")
+        with contextlib.suppress(Exception):
+            await ws.close()
+        return
+
+    room = str(hello.get("room", "home"))
+    async with _rooms_lock:
+        session = _rooms.get(room)
+        if session is None:
+            session = Session(settings, stt, tts, screen if settings.screen_enabled else None)
+            _rooms[room] = session
+
+    try:
+        await session.serve(ws, hello)
     except WebSocketDisconnect:
         pass
     except Exception:
         log.exception("сессия завершилась с ошибкой")
+    finally:
+        async with _rooms_lock:
+            # Комната живёт, пока в ней есть хоть одно устройство.
+            if _rooms.get(room) is session and session.is_empty:
+                del _rooms[room]
 
 
 def main() -> None:
     import uvicorn
 
-    uvicorn.run(app, host=settings.host, port=settings.port, log_level="warning")
+    # Браузер отдаёт микрофон только на защищённой странице, поэтому для
+    # сателлита на телефоне может понадобиться HTTPS. Сертификат
+    # самоподписанный — браузер один раз поругается, дальше запомнит.
+    #
+    # Учти: TLS включается на весь сервер, и колонка со своим ws://
+    # отвалится. Либо перепрошивать её на wss://, либо оставить выключенным
+    # и разрешить незащищённый источник флагом в браузере телефона.
+    ssl_args = {}
+    if settings.tls_cert and settings.tls_key:
+        cert, key = Path(settings.tls_cert), Path(settings.tls_key)
+        if cert.exists() and key.exists():
+            ssl_args = {"ssl_certfile": str(cert), "ssl_keyfile": str(key)}
+            log.warning(
+                "включён HTTPS на весь сервер: колонке теперь нужен wss://, "
+                "сателлит на https://<адрес>:%d/satellite", settings.port)
+        else:
+            log.warning("сертификат не найден (%s), поднимаюсь без HTTPS", cert)
+
+    uvicorn.run(app, host=settings.host, port=settings.port, log_level="warning",
+                **ssl_args)
 
 
 if __name__ == "__main__":

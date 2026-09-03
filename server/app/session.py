@@ -18,6 +18,7 @@ from app.config import Settings
 from app import memory_summary
 from app.memory import ConversationMemory
 from app.notify import TelegramNotifier
+from app.peers import Peer, PeerSet, ROLE_SPEAKER
 from app.tools import alarms as alarms_tool
 from app.protocol import (
     FRAME_MIC,
@@ -59,13 +60,15 @@ _CATCHUP_LIMIT_S = 0.150
 class Session:
     def __init__(
         self,
-        ws: WebSocket,
         settings: Settings,
         stt: SpeechToText,
         tts: TextToSpeech,
         screen: ScreenRenderer | None = None,
     ):
-        self._ws = ws
+        # Устройств может быть несколько: колонка на кухне и телефон в
+        # комнате — это два микрофона одного ассистента, а не два
+        # ассистента. Разговор, память и ответ у них общие.
+        self._peers = PeerSet()
         self._settings = settings
         # Синтез для серверных объявлений (сработавший таймер) — не зависит
         # от того, каким бэкендом ведётся сам разговор.
@@ -114,21 +117,63 @@ class Session:
         self._voice_failed = False
         self._voice_ready = False
         self._alarm_tasks: list[asyncio.Task] = []
+        self._sender: asyncio.Task | None = None
         self._notifier: TelegramNotifier | None = None
+
+
+    # ---------- рассылка устройствам ----------
+
+    async def _send_json_to(self, peers, payload) -> None:
+        for peer in peers:
+            with contextlib.suppress(Exception):
+                await peer.ws.send_json(payload)
+
+    async def _send_bytes_to(self, peers, payload: bytes) -> None:
+        for peer in peers:
+            with contextlib.suppress(Exception):
+                await peer.ws.send_bytes(payload)
 
     # ---------- жизненный цикл ----------
 
-    async def run(self) -> None:
-        sender = asyncio.create_task(self._send_audio_loop())
+    @property
+    def is_empty(self) -> bool:
+        """Никого не осталось — комнату можно убирать."""
+        return self._peers.empty
+
+    async def serve(self, ws: WebSocket, hello: dict[str, Any]) -> None:
+        """Обслуживает одно подключение до его обрыва.
+
+        Первое устройство поднимает сессию (голосовой бэкенд, память,
+        отправку звука), остальные просто присоединяются к уже живой.
+        """
+        peer = Peer(
+            ws,
+            device=hello.get("device", "unknown"),
+            role=hello.get("role", ROLE_SPEAKER),
+            has_screen=bool(hello.get("screen", False)),
+        )
+        first = self._peers.empty
+        self._peers.add(peer)
+
         try:
-            # Голосовой бэкенд стартует в _on_hello: только там известно имя
-            # колонки, а значит — какую сохранённую память ему подсаживать.
-            await self._receive_loop()
+            await self._on_hello(peer, hello)
+            if first:
+                # Отправщик звука один на сессию: он и микширует, и рассылает
+                # готовые кадры всем, у кого есть динамик.
+                self._sender = asyncio.create_task(self._send_audio_loop())
+            await self._receive_loop(peer)
         finally:
-            sender.cancel()
+            self._peers.remove(peer)
+            if self._peers.empty:
+                await self._close()
+
+    async def _close(self) -> None:
+        if self._sender is not None:
+            self._sender.cancel()
             with contextlib.suppress(asyncio.CancelledError):
-                await sender
-            await self._shutdown()
+                await self._sender
+            self._sender = None
+        await self._shutdown()
 
     async def _shutdown(self) -> None:
         if self._notifier is not None:
@@ -145,21 +190,30 @@ class Session:
 
     # ---------- приём ----------
 
-    async def _receive_loop(self) -> None:
+    async def _receive_loop(self, peer: Peer) -> None:
         while True:
-            packet = await self._ws.receive()
+            packet = await peer.ws.receive()
             if packet["type"] == "websocket.disconnect":
                 return
             if (data := packet.get("bytes")) is not None:
-                await self._on_binary(data)
+                await self._on_binary(peer, data)
             elif (text := packet.get("text")) is not None:
                 await self._on_text(text)
 
-    async def _on_binary(self, frame: bytes) -> None:
+    async def _on_binary(self, peer: Peer, frame: bytes) -> None:
         kind, payload = unpack_audio(frame)
         if kind != FRAME_MIC:
             return
-        pcm = self._mic_codec.decode(payload)
+        pcm = peer.codec.decode(payload) if peer.codec else self._mic_codec.decode(payload)
+
+        # Громкость считаем у каждого устройства всегда — по ней в начале
+        # реплики выбирается, кого слушать.
+        peer.note_audio(pcm)
+
+        if self._recording and not self._peers.accepts_audio(peer):
+            # Реплику уже пишем с другого микрофона. Подмешивать сюда
+            # второй нельзя: распознавание получит склейку из двух комнат.
+            return
 
         if not self._recording:
             # Активационное слово ищет сама плата (ESP-SR/WakeNet) — сюда
@@ -221,13 +275,26 @@ class Session:
             case unknown:
                 log.warning("неизвестное сообщение: %s", unknown)
 
-    async def _on_hello(self, msg: dict[str, Any]) -> None:
-        self._device = msg.get("device", "unknown")
-        self._client_has_screen = bool(msg.get("screen", False))
+    async def _on_hello(self, peer: Peer, msg: dict[str, Any]) -> None:
         codec_name = msg.get("codec", "pcm")
-        self._mic_codec = make_codec(
+        # Кодек у каждого устройства свой: телефон может слать PCM, пока
+        # колонка говорит на Opus.
+        peer.codec = make_codec(
             codec_name, self._settings.mic_sample_rate, self._settings.frame_samples_mic
         )
+        with contextlib.suppress(Exception):
+            await peer.ws.send_json({"t": "ready", "codec": peer.codec.name})
+
+        if not peer.has_speaker:
+            # Сателлит только слушает: ни звука, ни громкости ему не нужно,
+            # и сессию он не поднимает — она уже живёт.
+            with contextlib.suppress(Exception):
+                await peer.ws.send_json(state_msg(self._state))
+            return
+
+        self._device = peer.device
+        self._client_has_screen = peer.has_screen
+        self._mic_codec = peer.codec
         self._spk_codec = make_codec(
             codec_name, self._settings.out_sample_rate, self._settings.frame_samples_out
         )
@@ -237,9 +304,14 @@ class Session:
             self._spk_codec.name,
             codec_name,
         )
-        # Кодек мог не завестись — сообщаем клиенту фактический выбор.
-        await self._ws.send_json({"t": "ready", "codec": self._spk_codec.name})
-        await self._ws.send_json(volume_msg(self._mixer.volume))
+        with contextlib.suppress(Exception):
+            await peer.ws.send_json(volume_msg(self._mixer.volume))
+        if self._voice_ready or self._voice_failed:
+            # Сессия уже поднята другим устройством — второй раз бэкенд
+            # не заводим, только показываем текущее состояние.
+            with contextlib.suppress(Exception):
+                await peer.ws.send_json(state_msg(self._state))
+            return
         self._state = State.LISTENING  # чтобы следующий вызов точно перерисовал
         await self._set_state(State.IDLE)
 
@@ -262,8 +334,7 @@ class Session:
 
     async def _set_volume(self, level: float) -> None:
         self._mixer.volume = max(0.0, min(1.0, level))
-        with contextlib.suppress(Exception):
-            await self._ws.send_json(volume_msg(self._mixer.volume))
+        await self._send_json_to(self._peers.all(), volume_msg(self._mixer.volume))
         await self._show(f"Громкость {round(self._mixer.volume * 100)}%")
 
     async def _start_voice(self) -> None:
@@ -369,6 +440,11 @@ class Session:
             # Слушать некому — честно говорим об этом, а не молчим в ответ.
             await self._announce("Голосовой сервис недоступен.")
             return
+        # Кого слушаем эту реплику — решаем один раз, здесь. Дальше
+        # источник не меняется до её конца.
+        chosen = self._peers.choose_active()
+        if chosen is not None and len(self._peers.all()) > 1:
+            await self._show_source(chosen)
         await self._voice.begin_utterance()
         self._mic_bytes = 0
         self._vad.reset()
@@ -382,6 +458,7 @@ class Session:
             return
         self._recording = False
         self._mixer.set_listening(False)
+        self._peers.release_active()
 
         # Пустую реплику отправлять нельзя. Модель получает шум, не находит
         # в нём команды — и отвечает по прошлому контексту: «включал музыку,
@@ -401,6 +478,7 @@ class Session:
             return
         self._recording = False
         self._mixer.set_listening(False)
+        self._peers.release_active()
         await self._voice.barge_in()
         await self._set_idle()
 
@@ -481,7 +559,7 @@ class Session:
             pcm = await self._mixer.next_frame()
             packet = self._spk_codec.encode(pcm)
             send_started = time.monotonic()
-            await self._ws.send_bytes(pack_audio(FRAME_SPEAKER, packet))
+            await self._send_bytes_to(self._peers.speakers(), pack_audio(FRAME_SPEAKER, packet))
             now_after = time.monotonic()
             mix_ms = (send_started - mix_started) * 1000
             send_ms = (now_after - send_started) * 1000
@@ -515,9 +593,16 @@ class Session:
         if state in (State.LISTENING, State.IDLE):
             # Новый заход — старая реплика на экране только путает.
             self._screen_text = ""
-        with contextlib.suppress(Exception):
-            await self._ws.send_json(state_msg(state))
+        await self._send_json_to(self._peers.all(), state_msg(state))
         await self._redraw()
+
+    async def _show_source(self, peer) -> None:
+        """Показывает, какое устройство слушает — иначе выбор не виден.
+
+        Полезно и при отладке, и в быту: если колонка «не слышит», сразу
+        понятно, что реплику взял другой микрофон.
+        """
+        await self._show(f"Слушаю: {peer.device}")
 
     # ---------- экран ----------
 
@@ -539,5 +624,4 @@ class Session:
         )
         if not bitmap:
             return
-        with contextlib.suppress(Exception):
-            await self._ws.send_bytes(pack_audio(FRAME_SCREEN, bitmap))
+        await self._send_bytes_to(self._peers.screens(), pack_audio(FRAME_SCREEN, bitmap))

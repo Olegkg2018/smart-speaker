@@ -133,3 +133,51 @@ def test_room_is_empty_only_when_all_left():
     assert not peers.empty
     peers.remove(b)
     assert peers.empty
+
+
+# ---------- вытеснение зависшего соединения ----------
+
+
+def test_reconnecting_device_evicts_its_stale_ghost():
+    """Живой случай: колонка теряет питание без штатного закрытия сокета,
+    переподключается заново — старое зависшее соединение с тем же именем
+    должно уступить место новому, а не остаться вторым в комнате."""
+    peers = PeerSet()
+    ghost = _peer("kitchen")
+    peers.add(ghost)
+
+    fresh = _peer("kitchen")
+    evicted = peers.add(fresh)
+
+    assert evicted == [ghost]
+    assert peers.all() == [fresh]
+
+
+def test_eviction_is_scoped_to_device_and_role():
+    """Другое устройство или другая роль — не призрак, оба остаются."""
+    peers = PeerSet()
+    kitchen = _peer("kitchen", ROLE_SPEAKER)
+    peers.add(kitchen)
+
+    phone_satellite = _peer("kitchen", ROLE_SATELLITE)  # то же имя, другая роль
+    evicted = peers.add(phone_satellite)
+    assert evicted == []
+    assert set(peers.all()) == {kitchen, phone_satellite}
+
+    other_device = _peer("living_room")
+    evicted = peers.add(other_device)
+    assert evicted == []
+    assert len(peers.all()) == 3
+
+
+def test_evicting_the_active_source_frees_it():
+    """Если призрак был выбранным источником, освобождаем выбор — иначе
+    сервер продолжал бы формально «слушать» уже вытесненное устройство."""
+    peers = PeerSet()
+    ghost = _peer("kitchen")
+    peers.add(ghost)
+    ghost.note_audio(_pcm(3000))
+    assert peers.choose_active() is ghost
+
+    peers.add(_peer("kitchen"))
+    assert peers.active is None

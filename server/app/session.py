@@ -153,7 +153,14 @@ class Session:
             has_screen=bool(hello.get("screen", False)),
         )
         first = self._peers.empty
-        self._peers.add(peer)
+        stale = self._peers.add(peer)
+        for ghost in stale:
+            # Закрываем сокет явно: его собственная serve() получит
+            # disconnect и корректно выйдет через свой finally — не убираем
+            # её задачу молча, просто ускоряем то, что иначе случилось бы
+            # само, только сразу, а не когда-нибудь.
+            with contextlib.suppress(Exception):
+                await ghost.ws.close()
 
         try:
             await self._on_hello(peer, hello)

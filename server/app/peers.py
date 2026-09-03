@@ -82,12 +82,35 @@ class PeerSet:
         # двух микрофонов и половину слов потеряет.
         self._active: Peer | None = None
 
-    def add(self, peer: Peer) -> None:
+    def add(self, peer: Peer) -> list[Peer]:
+        """Добавляет устройство. Возвращает вытесненных — обычно пусто.
+
+        Живой случай: колонка теряет питание без штатного закрытия сокета
+        (роутер промолчал, FIN/RST не пришёл), переподключается заново —
+        и раньше садилась вторым устройством с тем же именем в ту же
+        комнату, а сервер мог слушать мёртвый микрофон вместо живого,
+        пока полуоткрытое соединение не истечёт когда-нибудь само (без
+        явного пинга WebSocket — часами). Здесь вытесняем сразу: то же
+        имя и роль — значит это переподключение того же устройства, а
+        не второе такое же физически.
+        """
+        stale = [p for p in self._peers if p.device == peer.device and p.role == peer.role]
+        for p in stale:
+            self._peers.remove(p)
+            if self._active is p:
+                self._active = None
+
         self._peers.append(peer)
         log.info(
             "устройство «%s» подключилось (%s), всего в сессии: %d",
             peer.device, peer.role, len(self._peers),
         )
+        if stale:
+            log.warning(
+                "устройство «%s» переподключилось, вытеснил зависшее старое соединение",
+                peer.device,
+            )
+        return stale
 
     def remove(self, peer: Peer) -> None:
         if peer in self._peers:

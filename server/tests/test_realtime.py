@@ -171,6 +171,7 @@ def _idle_voice():
     voice._manager = None
     voice._history = []
     voice._summary = ""
+    voice._last_reconnect_announce = 0.0
     return voice
 
 
@@ -250,6 +251,112 @@ async def test_end_utterance_returns_to_idle_when_connection_is_mid_reconnect():
 
     assert turn_done_called, "сессия должна вернуться в IDLE, а не зависнуть в LISTENING"
     assert spoken, "стоит хотя бы предупредить, что реплика потеряна"
+
+
+async def test_reconnect_announcement_does_not_repeat_faster_than_the_gap():
+    """Живой случай: соединение не поднималось несколько минут, а что-то
+    (эхо колонки, шум в комнате) продолжало будить её заново каждые
+    десять-пятнадцать секунд — «секунду, переподключаюсь» зациклилось.
+    Turn_done() обязан звать каждый раз, а вот озвучивать — не чаще, чем
+    раз в _RECONNECT_ANNOUNCE_MIN_GAP_S."""
+    voice = _idle_voice()
+    voice._conn = None
+
+    class _Cb:
+        async def turn_done(self):
+            return None
+
+    voice._cb = _Cb()
+    spoken = []
+
+    async def fake_speak(text):
+        spoken.append(text)
+
+    voice._ctx = types.SimpleNamespace(speak=fake_speak)
+
+    await voice.end_utterance()
+    await voice.end_utterance()
+    await voice.end_utterance()
+
+    assert len(spoken) == 1, "вторая и третья попытка не должны озвучиваться заново так быстро"
+
+
+async def test_reconnect_with_retry_tries_again_after_a_transient_failure(monkeypatch):
+    """Короткая сетевая заминка не должна оставлять сессию мёртвой до
+    следующего часового цикла — раньше и плановое, и реактивное
+    переподключение сдавались после первой же неудачи."""
+    monkeypatch.setattr(realtime_mod, "_RECONNECT_BACKOFF_S", (0.0, 0.0, 0.0))
+    voice = _idle_voice()
+    attempts = []
+
+    async def flaky_start(history, summary=""):
+        attempts.append(1)
+        if len(attempts) < 2:
+            raise RuntimeError("сеть моргнула")
+
+    voice.start = flaky_start
+
+    ok = await voice._reconnect_with_retry()
+
+    assert ok is True
+    assert len(attempts) == 2, "должно было хватить второй попытки"
+
+
+async def test_reconnect_with_retry_gives_up_after_the_configured_attempts(monkeypatch):
+    monkeypatch.setattr(realtime_mod, "_RECONNECT_ATTEMPTS", 2)
+    monkeypatch.setattr(realtime_mod, "_RECONNECT_BACKOFF_S", (0.0,))
+    voice = _idle_voice()
+    attempts = []
+
+    async def always_fails(history, summary=""):
+        attempts.append(1)
+        raise RuntimeError("сеть недоступна")
+
+    voice.start = always_fails
+
+    ok = await voice._reconnect_with_retry()
+
+    assert ok is False
+    assert len(attempts) == 2, "не больше настроенного числа попыток"
+
+
+class _HangingManager:
+    """Как настоящий менеджер соединения, но __aenter__ никогда не отвечает.
+
+    Живой случай: сетевая заминка подвесила именно этот вызов на 14+ минут
+    без единого исключения — start() ждал вечно, self._conn оставался None
+    и это никого не удивляло: ошибки-то не было."""
+
+    def __init__(self):
+        self.aexit_called = False
+
+    async def __aenter__(self):
+        await asyncio.sleep(999)
+
+    async def __aexit__(self, *exc):
+        self.aexit_called = True
+
+
+async def test_start_gives_up_instead_of_hanging_forever(monkeypatch):
+    monkeypatch.setattr(realtime_mod, "_CONNECT_TIMEOUT_S", 0.01)
+    voice = RealtimeVoice.__new__(RealtimeVoice)
+    voice._refresh_task = None
+    manager = _HangingManager()
+    voice._client = types.SimpleNamespace(
+        realtime=types.SimpleNamespace(connect=lambda model: manager)
+    )
+    voice._settings = types.SimpleNamespace(openai_realtime_model="gpt-realtime")
+
+    raised = False
+    try:
+        await voice.start([], "")
+    except TimeoutError:
+        raised = True
+
+    assert raised, "зависшее подключение должно превращаться в быструю ошибку"
+    assert voice._conn is None
+    assert voice._manager is None
+    assert manager.aexit_called, "частично открытое соединение нужно закрыть, а не бросить"
 
 
 class _FakeConn:

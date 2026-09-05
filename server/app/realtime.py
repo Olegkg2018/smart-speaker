@@ -17,6 +17,7 @@ import base64
 import contextlib
 import json
 import logging
+import time
 
 from openai import AsyncOpenAI
 
@@ -56,6 +57,29 @@ _REFRESH_MARGIN_S = 120
 # Whisper обычно укладывается в доли секунды; ждать дольше незачем —
 # память подождёт, а без ответа в ней остаться нельзя.
 _TRANSCRIPT_WAIT_S = 3.0
+
+# У установки соединения (connect + session.update) не было потолка вовсе —
+# живой случай: сетевая заминка подвесила его на 14+ минут молча, без
+# исключения. self._conn всё это время оставался None, а переподключение
+# никто больше не пробовал — «дождусь штатного разрыва» ждать было нечего,
+# разрывать уже было нечего. Таймаут ниже превращает молчаливое зависание в
+# быструю, обрабатываемую ошибку.
+_CONNECT_TIMEOUT_S = 15.0
+
+# Столько раз пробуем восстановить соединение подряд, прежде чем сдаться
+# и подождать следующего повода (новую реплику или плановое обновление).
+# Задержки растут: короткая сетевая заминка не должна разрешиться на первой
+# же попытке слишком поздно, а долгий сбой (ключ, авария у OpenAI) не стоит
+# долбить раз в секунду.
+_RECONNECT_ATTEMPTS = 3
+_RECONNECT_BACKOFF_S = (3.0, 10.0, 30.0)
+
+# Пока соединение не восстановится, каждая новая реплика узнаёт об этом
+# заново и просит подождать. Если что-то (эхо колонки, шум в комнате)
+# продолжает будить её раз за разом, не нужно озвучивать это чаще: живой
+# случай — «секунду, переподключаюсь» зациклилось на минутном интервале,
+# пока соединение не поднималось вовсе.
+_RECONNECT_ANNOUNCE_MIN_GAP_S = 30.0
 
 def _decode_and_resample(delta: str, src_rate: int, dst_rate: int) -> bytes:
     return resample_pcm16(base64.b64decode(delta), src_rate, dst_rate)
@@ -138,6 +162,9 @@ class RealtimeVoice:
         self._pending_user: str | None = None
         self._pending_assistant: str | None = None
         self._user_ready = asyncio.Event()
+        # Не озвучивать «секунду, переподключаюсь» чаще раза в
+        # _RECONNECT_ANNOUNCE_MIN_GAP_S — см. константу.
+        self._last_reconnect_announce = 0.0
 
     async def start(self, history: list[Turn], summary=None) -> None:
         # Запоминаем для переподключения: OpenAI сама рвёт сессию через час
@@ -150,39 +177,55 @@ class RealtimeVoice:
             # Обновление таймера привязано к возрасту КОНКРЕТНОГО соединения —
             # старый отсчёт от предыдущего start() тут ни при чём.
             self._refresh_task.cancel()
-        self._manager = self._client.realtime.connect(model=self._settings.openai_realtime_model)
-        self._conn = await self._manager.__aenter__()
-        await self._conn.session.update(
-            session={
-                "type": "realtime",
-                "instructions": _build_instructions(
-                    history, notes_tool.as_instructions(self._settings.notes_dir), summary
-                ),
-                "output_modalities": ["audio"],
-                "audio": {
-                    "input": {
-                        "format": {"type": "audio/pcm", "rate": _REALTIME_RATE},
-                        "turn_detection": None,
-                        "transcription": {"model": "whisper-1"},
+
+        async def _connect() -> None:
+            self._manager = self._client.realtime.connect(
+                model=self._settings.openai_realtime_model
+            )
+            self._conn = await self._manager.__aenter__()
+            await self._conn.session.update(
+                session={
+                    "type": "realtime",
+                    "instructions": _build_instructions(
+                        history, notes_tool.as_instructions(self._settings.notes_dir), summary
+                    ),
+                    "output_modalities": ["audio"],
+                    "audio": {
+                        "input": {
+                            "format": {"type": "audio/pcm", "rate": _REALTIME_RATE},
+                            "turn_detection": None,
+                            "transcription": {"model": "whisper-1"},
+                        },
+                        "output": {
+                            "format": {"type": "audio/pcm", "rate": _REALTIME_RATE},
+                            "voice": self._settings.openai_voice,
+                        },
                     },
-                    "output": {
-                        "format": {"type": "audio/pcm", "rate": _REALTIME_RATE},
-                        "voice": self._settings.openai_voice,
+                    "tools": _TOOLS,
+                    # Без этого контекст растёт неограниченно, а Realtime считает
+                    # входные токены за весь накопленный разговор на каждый ответ —
+                    # десятая реплика стоит как десять первых.
+                    "truncation": {
+                        "type": "retention_ratio",
+                        "retention_ratio": self._settings.realtime_retention_ratio,
+                        "token_limits": {
+                            "post_instructions": self._settings.realtime_context_tokens
+                        },
                     },
-                },
-                "tools": _TOOLS,
-                # Без этого контекст растёт неограниченно, а Realtime считает
-                # входные токены за весь накопленный разговор на каждый ответ —
-                # десятая реплика стоит как десять первых.
-                "truncation": {
-                    "type": "retention_ratio",
-                    "retention_ratio": self._settings.realtime_retention_ratio,
-                    "token_limits": {
-                        "post_instructions": self._settings.realtime_context_tokens
-                    },
-                },
-            }
-        )
+                }
+            )
+
+        try:
+            await asyncio.wait_for(_connect(), timeout=_CONNECT_TIMEOUT_S)
+        except TimeoutError:
+            log.error("подключение к Realtime не ответило за %.0f с", _CONNECT_TIMEOUT_S)
+            if self._manager is not None:
+                with contextlib.suppress(Exception):
+                    await self._manager.__aexit__(None, None, None)
+            self._manager = None
+            self._conn = None
+            raise
+
         self._recv_task = asyncio.create_task(self._recv_loop())
         self._refresh_task = asyncio.create_task(self._proactive_refresh())
 
@@ -243,8 +286,15 @@ class RealtimeVoice:
             # навсегда, никто не звал turn_done(). Живой случай: колонка
             # простояла «слушаю» несколько часов до ручного вмешательства.
             log.warning("реплика закончилась во время переподключения к Realtime — реплика потеряна")
-            with contextlib.suppress(Exception):
-                await self._ctx.speak("Секунду, переподключаюсь — повтори, пожалуйста.")
+            # Если что-то (эхо колонки, шум в комнате) продолжает будить её
+            # раз за разом, пока связи всё ещё нет, не озвучивать это на
+            # каждый заход — живой случай: фраза зациклилась на минутном
+            # интервале, пока соединение не поднималось вовсе.
+            now = time.monotonic()
+            if now - self._last_reconnect_announce >= _RECONNECT_ANNOUNCE_MIN_GAP_S:
+                self._last_reconnect_announce = now
+                with contextlib.suppress(Exception):
+                    await self._ctx.speak("Секунду, переподключаюсь — повтори, пожалуйста.")
             await self._cb.turn_done()
             return
         # Хвост фразы ещё лежит в пачке — без этого пропадут последние
@@ -330,6 +380,27 @@ class RealtimeVoice:
         if not self._reconnecting:
             asyncio.create_task(self._reconnect())
 
+    async def _reconnect_with_retry(self) -> bool:
+        """Несколько попыток поднять соединение подряд, с растущей паузой.
+
+        И реактивный путь (после разрыва), и плановый (_proactive_refresh)
+        раньше сдавались после первой же неудачи и ждали следующего повода —
+        а для планового его больше не было: старое соединение уже закрыто,
+        «штатный разрыв» ждать было нечего. Короткая сетевая заминка
+        оставляла сессию мёртвой до следующего часового цикла.
+        """
+        for attempt in range(_RECONNECT_ATTEMPTS):
+            if attempt > 0:
+                await asyncio.sleep(_RECONNECT_BACKOFF_S[attempt - 1])
+            try:
+                await self.start(self._history, self._summary)
+                return True
+            except Exception:
+                log.exception(
+                    "попытка %d/%d поднять Realtime не удалась", attempt + 1, _RECONNECT_ATTEMPTS
+                )
+        return False
+
     async def _reconnect(self) -> None:
         """Поднимает сессию заново после разрыва — час OpenAI держит её сам.
 
@@ -337,11 +408,9 @@ class RealtimeVoice:
         соединением: мигает состояниями, но ничего не отвечает, и со
         стороны это неотличимо от «не слышит».
         """
-        try:
-            await self.start(self._history, self._summary)
+        if await self._reconnect_with_retry():
             log.info("соединение с OpenAI Realtime восстановлено")
-        except Exception:
-            log.exception("не удалось переподключиться к OpenAI Realtime")
+        else:
             with contextlib.suppress(Exception):
                 await self._ctx.speak("Голосовой сервис пока недоступен.")
 
@@ -385,13 +454,15 @@ class RealtimeVoice:
         if old_manager is not None:
             with contextlib.suppress(Exception):
                 await old_manager.__aexit__(None, None, None)
-        try:
-            await self.start(self._history, self._summary)
+        if await self._reconnect_with_retry():
             log.info("сессия Realtime обновлена заранее")
-        except Exception:
-            log.exception("не удалось обновить сессию Realtime заранее — дождусь штатного разрыва")
-        finally:
-            self._reconnecting = False
+        else:
+            log.error(
+                "не удалось обновить сессию Realtime заранее за %d попыток", _RECONNECT_ATTEMPTS
+            )
+            with contextlib.suppress(Exception):
+                await self._ctx.speak("Голосовой сервис пока недоступен.")
+        self._reconnecting = False
 
     async def _on_event(self, event) -> None:
         etype = event.type

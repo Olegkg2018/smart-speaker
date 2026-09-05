@@ -85,6 +85,27 @@ def _decode_and_resample(delta: str, src_rate: int, dst_rate: int) -> bytes:
     return resample_pcm16(base64.b64decode(delta), src_rate, dst_rate)
 
 
+async def _drain_cancelled(task: asyncio.Task, label: str) -> None:
+    """Ждёт отменённую задачу в фоне, не блокируя того, кто её отменил.
+
+    Раньше это ожидание было в основном потоке `_proactive_refresh` — и
+    именно оно однажды повисло на минуты. Не потому, что забыли таймаут:
+    `asyncio.wait_for` тут не спасает вовсе, если сама задача проглатывает
+    `CancelledError` и не завершается, — он всё равно ждёт её настоящего
+    конца, просто откладывая исключение. Единственный надёжный выход — не
+    ждать синхронно: свою часть работы (новое соединение) продолжать сразу,
+    а старую задачу закрывать сама по себе, сколько бы это ни заняло.
+    """
+    with contextlib.suppress(asyncio.CancelledError, Exception):
+        await task
+    log.debug("фоновая уборка «%s» завершена", label)
+
+
+async def _drain_manager_exit(manager) -> None:
+    with contextlib.suppress(Exception):
+        await manager.__aexit__(None, None, None)
+
+
 def _build_instructions(history: list[Turn], notes: str = "", summary=None) -> str:
     """SYSTEM_PROMPT плюс сводка и краткий пересказ прошлого разговора.
 
@@ -392,6 +413,10 @@ class RealtimeVoice:
         for attempt in range(_RECONNECT_ATTEMPTS):
             if attempt > 0:
                 await asyncio.sleep(_RECONNECT_BACKOFF_S[attempt - 1])
+            # Лог до попытки, а не только после неудачи: иначе тишина в
+            # логе неотличима от «ещё не пробовали» — на живом разборе это
+            # стоило немалого времени на угадывание, где именно застряло.
+            log.info("попытка %d/%d поднять Realtime — начинаю", attempt + 1, _RECONNECT_ATTEMPTS)
             try:
                 await self.start(self._history, self._summary)
                 return True
@@ -447,13 +472,21 @@ class RealtimeVoice:
         old_task, self._recv_task = self._recv_task, None
         old_manager, self._manager = self._manager, None
         self._conn = None
+        # Тот же урок, что и у start() (см. _CONNECT_TIMEOUT_S): закрытие
+        # старого соединения — тоже сетевой вызов и тоже может зависнуть.
+        # Живой случай: именно это молчаливо повисло на минуты. Важно: тут
+        # НЕ ПОМОГАЕТ обернуть ожидание в asyncio.wait_for — если сама
+        # задача проглатывает CancelledError и не завершается, wait_for
+        # всё равно ждёт её настоящего конца, просто откладывая исключение
+        # (проверено: зависает точно так же). Единственный надёжный выход —
+        # не ждать синхронно вовсе: отменить и убрать в фоне, а к новому
+        # соединению переходить сразу.
         if old_task is not None:
             old_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await old_task
+            asyncio.create_task(_drain_cancelled(old_task, "recv_task"))
         if old_manager is not None:
-            with contextlib.suppress(Exception):
-                await old_manager.__aexit__(None, None, None)
+            asyncio.create_task(_drain_manager_exit(old_manager))
+        log.info("старое соединение отправлено на закрытие в фоне — поднимаю новое")
         if await self._reconnect_with_retry():
             log.info("сессия Realtime обновлена заранее")
         else:

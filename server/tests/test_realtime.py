@@ -191,6 +191,50 @@ async def test_proactive_refresh_swaps_connection_when_idle():
     assert voice._reconnecting is False, "флаг должен сброситься после пересборки"
 
 
+async def test_proactive_refresh_does_not_wait_for_old_connection_to_close():
+    """Живой случай: закрытие СТАРОГО соединения зависло на минуты.
+
+    Важно: обернуть это ожидание в asyncio.wait_for НЕ помогает — если сама
+    задача проглатывает CancelledError и не завершается сразу, wait_for всё
+    равно ждёт её настоящего конца, просто откладывая исключение (проверено
+    отдельно: с этой оберткой тест зависал точно так же, как продакшен).
+    Единственный надёжный выход — не ждать синхронно вовсе: новое соединение
+    поднимается сразу, старое закрывается само по себе в фоне."""
+    voice = _idle_voice()
+
+    old_recv_task = asyncio.create_task(asyncio.sleep(999))
+    voice._recv_task = old_recv_task
+
+    manager_exited = asyncio.Event()
+
+    class _SlowManager:
+        async def __aexit__(self, *exc):
+            # Дольше, чем мы готовы ждать синхронно ниже — если бы
+            # _proactive_refresh ждал этого напрямую, тест бы не уложился
+            # в отведённый таймаут.
+            await asyncio.sleep(0.3)
+            manager_exited.set()
+
+    voice._manager = _SlowManager()
+
+    started = []
+
+    async def fake_start(history, summary=""):
+        started.append(history)
+
+    voice.start = fake_start
+
+    await asyncio.wait_for(voice._proactive_refresh(delay_s=0), timeout=0.1)
+
+    assert started, "новое соединение должно было подняться, не дожидаясь старого"
+    assert not manager_exited.is_set(), "закрытие старого должно было уйти в фон, а не в этот вызов"
+
+    # Дать фоновой уборке время дойти до конца, чтобы к концу теста ничего
+    # не осталось висеть в цикле событий.
+    await asyncio.sleep(0.4)
+    assert manager_exited.is_set(), "но в фоне закрытие всё же должно было завершиться"
+
+
 async def test_proactive_refresh_defers_while_speaking():
     """Идёт озвучка ответа — прерывать её обновлением сессии нельзя."""
     voice = _idle_voice()

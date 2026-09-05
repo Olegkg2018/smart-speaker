@@ -7,8 +7,10 @@ RealtimeVoice в test_realtime.py: собираем голый объект и �
 только то, что трогает проверяемый путь.
 """
 
+import asyncio
 import types
 
+import app.session as session_mod
 from app.peers import ROLE_SATELLITE, Peer
 from app.protocol import State
 from app.session import Session
@@ -53,6 +55,7 @@ def _idle_session(heard_speech: bool, mic_bytes: int) -> Session:
         release_active=lambda: None, all=lambda: [], screens=lambda: []
     )
     session._state = State.LISTENING
+    session._state_watchdog = None
     session._screen = None
     session._screen_text = ""
     return session
@@ -103,6 +106,65 @@ async def test_stop_recording_is_a_noop_when_not_recording():
 
     assert not session._voice.barge_in_called
     assert not session._voice.end_utterance_called
+
+
+async def test_watchdog_forces_idle_when_state_never_advances(monkeypatch):
+    """Сторож незавершённых состояний: если LISTENING/THINKING/SPEAKING не
+    сменилось само за отведённое время, сессия обязана вернуться в IDLE.
+
+    Наблюдали дважды разными путями — Realtime не прислал response.done
+    (застряла в THINKING) и реплика оборвалась ровно в момент планового
+    переподключения раз в час (застряла в LISTENING на часы, пока не
+    вмешались руками). Это последняя линия защиты от обоих случаев и любых
+    похожих, ещё не встреченных."""
+    monkeypatch.setattr(session_mod, "_STATE_WATCHDOG_S", 0.01)
+
+    session = Session.__new__(Session)
+    session._state = State.IDLE
+    session._screen_text = ""
+    session._screen = None
+    session._client_has_screen = False
+    session._recording = True
+    session._state_watchdog = None
+    session._voice = _FakeVoice()
+    session._mixer = types.SimpleNamespace(is_playing=False)
+    session._peers = types.SimpleNamespace(
+        all=lambda: [], screens=lambda: [], release_active=lambda: None,
+    )
+
+    await session._set_state(State.LISTENING)
+    await asyncio.sleep(0.05)
+
+    assert session._state == State.IDLE
+    assert session._recording is False
+    assert session._voice.barge_in_called
+
+
+async def test_watchdog_does_not_fire_once_state_moves_on(monkeypatch):
+    """Обычный, не зависший разговор не должен трогаться сторожем."""
+    monkeypatch.setattr(session_mod, "_STATE_WATCHDOG_S", 0.05)
+
+    session = Session.__new__(Session)
+    session._state = State.IDLE
+    session._screen_text = ""
+    session._screen = None
+    session._client_has_screen = False
+    session._recording = True
+    session._state_watchdog = None
+    session._voice = _FakeVoice()
+    session._mixer = types.SimpleNamespace(is_playing=False)
+    session._peers = types.SimpleNamespace(
+        all=lambda: [], screens=lambda: [], release_active=lambda: None,
+    )
+
+    await session._set_state(State.LISTENING)
+    await session._set_state(State.THINKING)
+    await session._set_state(State.SPEAKING)
+    await session._set_state(State.IDLE)
+    await asyncio.sleep(0.08)
+
+    assert session._state == State.IDLE
+    assert not session._voice.barge_in_called, "сторож не должен был сработать вовсе"
 
 
 async def test_satellite_hello_gets_current_volume():

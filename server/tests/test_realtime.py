@@ -222,6 +222,36 @@ async def test_proactive_refresh_skips_dead_connection():
     assert not started, "обновлять мёртвое соединение незачем"
 
 
+async def test_end_utterance_returns_to_idle_when_connection_is_mid_reconnect():
+    """Плановое переподключение раз в час обнуляет self._conn на время
+    пересборки. Реплика, закончившаяся ровно в этот зазор, раньше молча
+    проглатывалась — turn_done() никто не звал, и сессия оставалась в
+    LISTENING навсегда. Живой случай: колонка простояла «слушаю» несколько
+    часов, пока не пришло ручное вмешательство (см. app/session.py,
+    _STATE_WATCHDOG_S — там теперь есть и общий сторож на этот случай)."""
+    voice = _idle_voice()
+    voice._conn = None
+    turn_done_called = False
+
+    class _Cb:
+        async def turn_done(self):
+            nonlocal turn_done_called
+            turn_done_called = True
+
+    voice._cb = _Cb()
+    spoken = []
+
+    async def fake_speak(text):
+        spoken.append(text)
+
+    voice._ctx = types.SimpleNamespace(speak=fake_speak)
+
+    await voice.end_utterance()
+
+    assert turn_done_called, "сессия должна вернуться в IDLE, а не зависнуть в LISTENING"
+    assert spoken, "стоит хотя бы предупредить, что реплика потеряна"
+
+
 class _FakeConn:
     def __init__(self):
         self.created_items = []

@@ -56,6 +56,15 @@ _LATENCY_REPORT_S = 5.0
 # не примет накопленное.
 _CATCHUP_LIMIT_S = 0.150
 
+# Сколько времени сессия имеет право провести в незавершённом состоянии
+# (LISTENING/THINKING/SPEAKING), прежде чем сервер сам решит, что что-то
+# сломалось, и вернётся в IDLE. Наблюдали дважды разными путями: Realtime не
+# прислал response.done (застряла в THINKING) и реплика закончилась ровно в
+# момент планового переподключения раз в час (застряла в LISTENING на часы,
+# пока не пришло ручное вмешательство). Ни разу это не было настоящей долгой
+# репликой — 45 с щедро выше любого легитимного вызова инструмента.
+_STATE_WATCHDOG_S = 45.0
+
 
 class Session:
     def __init__(
@@ -119,6 +128,7 @@ class Session:
         self._alarm_tasks: list[asyncio.Task] = []
         self._sender: asyncio.Task | None = None
         self._notifier: TelegramNotifier | None = None
+        self._state_watchdog: asyncio.Task | None = None
 
 
     # ---------- рассылка устройствам ----------
@@ -180,6 +190,11 @@ class Session:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._sender
             self._sender = None
+        if self._state_watchdog is not None:
+            self._state_watchdog.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._state_watchdog
+            self._state_watchdog = None
         await self._shutdown()
 
     async def _shutdown(self) -> None:
@@ -605,6 +620,32 @@ class Session:
             self._screen_text = ""
         await self._send_json_to(self._peers.all(), state_msg(state))
         await self._redraw()
+
+        # Сторож незавершённых состояний — см. _STATE_WATCHDOG_S. Не отменяем
+        # сами себя: если это сработавший сторож зовёт _set_idle() → сюда же
+        # с state=IDLE, self._state_watchdog в этот момент и есть текущая
+        # задача, отменять её изнутри незачем и небезопасно.
+        current = asyncio.current_task()
+        if self._state_watchdog is not None and self._state_watchdog is not current:
+            self._state_watchdog.cancel()
+        if state in (State.LISTENING, State.THINKING, State.SPEAKING):
+            self._state_watchdog = asyncio.create_task(self._watch_state(state))
+        else:
+            self._state_watchdog = None
+
+    async def _watch_state(self, state: State) -> None:
+        await asyncio.sleep(_STATE_WATCHDOG_S)
+        if self._state != state:
+            return
+        log.warning(
+            "состояние «%s» не менялось %.0f с — похоже на зависание, возвращаюсь в IDLE",
+            state.value, _STATE_WATCHDOG_S,
+        )
+        self._recording = False
+        self._peers.release_active()
+        with contextlib.suppress(Exception):
+            await self._voice.barge_in()
+        await self._set_idle()
 
     async def _show_source(self, peer) -> None:
         """Показывает, какое устройство слушает — иначе выбор не виден.

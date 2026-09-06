@@ -146,7 +146,6 @@ void app_main(void)
     // send_hello() сам попросит PCM, если Opus не поднялся.
     happy_opus_init();
     ESP_ERROR_CHECK(happy_wake_cache_start());
-    ESP_ERROR_CHECK(happy_audio_debug_start());
     // Обработку поднимаем до микрофона: он сразу начнёт гнать через неё звук.
     ESP_ERROR_CHECK(happy_frontend_start(send_mic_frame, on_wake_word));
     ESP_ERROR_CHECK(happy_audio_in_start());
@@ -154,6 +153,13 @@ void app_main(void)
 
     ESP_ERROR_CHECK(happy_wifi_start());
     happy_wifi_wait_connected();
+    // Сокет отладки звука — это уже сеть, а не аудио-тракт: до
+    // happy_wifi_wait_connected() стек LwIP ещё не поднят, и socket()
+    // падал с `assert failed: tcpip_send_msg_wait_sem (Invalid mbox)` —
+    // TCP/IP-задача ещё не создана. happy_audio_debug_feed() безопасно
+    // не отправляет ничего, пока сокет не готов, так что несколько первых
+    // кадров микрофона до этой строки просто не продублируются.
+    ESP_ERROR_CHECK(happy_audio_debug_start());
     ESP_ERROR_CHECK(happy_ws_start());
 
     if (xTaskCreate(watchdog_task, "watchdog", 2560, NULL, 2, NULL) != pdPASS) {

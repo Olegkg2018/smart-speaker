@@ -325,7 +325,7 @@ OPENAI_VOICE=marin
 ## Тесты
 
 ```bash
-cd server && python -m pytest    # 232 теста
+cd server && python -m pytest    # 233 теста
 ```
 
 Запускать из `server/`: в корне не подхватывается `asyncio_mode` и половина

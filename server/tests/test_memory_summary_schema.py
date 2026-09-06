@@ -126,3 +126,16 @@ async def test_prompt_warns_against_commands_and_guessing(monkeypatch):
     prompt = captured[0]["messages"][0]["content"]
     assert "не команда" in prompt
     assert "криво распознан" in prompt
+
+
+async def test_prompt_warns_against_inventing_a_real_persons_name(monkeypatch):
+    """Живой случай: реплика на польском (ошибка распознавания невнятной
+    речи) — модель вместо того, чтобы пропустить непонятную фразу, вписала
+    в «человек» имя реального известного человека («Ольга Билан, дизайнер
+    одежды»), и колонка на каждый следующий вопрос отвечала «Привет,
+    Ольга!» вместо ответа по существу."""
+    captured = _patch(monkeypatch, '{"человек": []}')
+    await memory_summary.fold_in("sk", "gpt-4o-mini", None, [Turn("user", "х")])
+    prompt = captured[0]["messages"][0]["content"]
+    assert "известного человека" in prompt
+    assert "на другом" in prompt and "языке" in prompt

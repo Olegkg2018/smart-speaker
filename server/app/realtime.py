@@ -18,6 +18,7 @@ import contextlib
 import json
 import logging
 import time
+from typing import Any
 
 from openai import AsyncOpenAI
 
@@ -174,6 +175,11 @@ class RealtimeVoice:
         self._summary = None
         self._reconnecting = False
         self._refresh_task: asyncio.Task | None = None
+        # Растёт на каждый вызов start(). Если попытка не уложилась в
+        # таймаут и код ушёл дальше (ретраить или сдаться), а SDK всё же
+        # отвечает позже — по этому номеру _adopt_late_connect понимает,
+        # актуален ли ещё этот ответ, или уже нет.
+        self._connect_generation = 0
         # Обмен «вопрос-ответ» копится целиком и ложится в память одной
         # парой. Порядок событий у Realtime этого не гарантирует: он
         # отвечает прямо на звук, а расшифровку вопроса Whisper досылает
@@ -199,54 +205,93 @@ class RealtimeVoice:
             # старый отсчёт от предыдущего start() тут ни при чём.
             self._refresh_task.cancel()
 
-        async def _connect() -> None:
-            self._manager = self._client.realtime.connect(
-                model=self._settings.openai_realtime_model
-            )
-            self._conn = await self._manager.__aenter__()
-            await self._conn.session.update(
-                session={
-                    "type": "realtime",
-                    "instructions": _build_instructions(
-                        history, notes_tool.as_instructions(self._settings.notes_dir), summary
-                    ),
-                    "output_modalities": ["audio"],
-                    "audio": {
-                        "input": {
-                            "format": {"type": "audio/pcm", "rate": _REALTIME_RATE},
-                            "turn_detection": None,
-                            "transcription": {"model": "whisper-1"},
-                        },
-                        "output": {
-                            "format": {"type": "audio/pcm", "rate": _REALTIME_RATE},
-                            "voice": self._settings.openai_voice,
-                        },
-                    },
-                    "tools": _TOOLS,
-                    # Без этого контекст растёт неограниченно, а Realtime считает
-                    # входные токены за весь накопленный разговор на каждый ответ —
-                    # десятая реплика стоит как десять первых.
-                    "truncation": {
-                        "type": "retention_ratio",
-                        "retention_ratio": self._settings.realtime_retention_ratio,
-                        "token_limits": {
-                            "post_instructions": self._settings.realtime_context_tokens
-                        },
-                    },
-                }
-            )
+        self._connect_generation += 1
+        my_generation = self._connect_generation
 
-        try:
-            await asyncio.wait_for(_connect(), timeout=_CONNECT_TIMEOUT_S)
-        except TimeoutError:
-            log.error("подключение к Realtime не ответило за %.0f с", _CONNECT_TIMEOUT_S)
-            if self._manager is not None:
+        async def _connect() -> tuple[Any, Any]:
+            manager = self._client.realtime.connect(model=self._settings.openai_realtime_model)
+            conn = await manager.__aenter__()
+            try:
+                await conn.session.update(
+                    session={
+                        "type": "realtime",
+                        "instructions": _build_instructions(
+                            history, notes_tool.as_instructions(self._settings.notes_dir), summary
+                        ),
+                        "output_modalities": ["audio"],
+                        "audio": {
+                            "input": {
+                                "format": {"type": "audio/pcm", "rate": _REALTIME_RATE},
+                                "turn_detection": None,
+                                "transcription": {"model": "whisper-1"},
+                            },
+                            "output": {
+                                "format": {"type": "audio/pcm", "rate": _REALTIME_RATE},
+                                "voice": self._settings.openai_voice,
+                            },
+                        },
+                        "tools": _TOOLS,
+                        # Без этого контекст растёт неограниченно, а Realtime считает
+                        # входные токены за весь накопленный разговор на каждый ответ —
+                        # десятая реплика стоит как десять первых.
+                        "truncation": {
+                            "type": "retention_ratio",
+                            "retention_ratio": self._settings.realtime_retention_ratio,
+                            "token_limits": {
+                                "post_instructions": self._settings.realtime_context_tokens
+                            },
+                        },
+                    }
+                )
+            except Exception:
                 with contextlib.suppress(Exception):
-                    await self._manager.__aexit__(None, None, None)
-            self._manager = None
-            self._conn = None
-            raise
+                    await manager.__aexit__(None, None, None)
+                raise
+            return manager, conn
 
+        # Тот же урок, что и с закрытием старого соединения (см. коммент у
+        # _drain_cancelled): asyncio.wait_for() тут не помогает — если сам
+        # вызов внутри SDK не откликается на отмену вовремя, он всё равно
+        # ждёт настоящего завершения. Живой случай: именно эта попытка
+        # однажды молчала 11+ часов без единого исключения. asyncio.wait()
+        # без отмены — единственный способ по-настоящему перестать ждать,
+        # не полагаясь на то, что задача вообще умеет отменяться.
+        connect_task = asyncio.create_task(_connect())
+        done, _ = await asyncio.wait({connect_task}, timeout=_CONNECT_TIMEOUT_S)
+
+        if connect_task not in done:
+            log.error("подключение к Realtime не ответило за %.0f с", _CONNECT_TIMEOUT_S)
+            asyncio.create_task(self._adopt_late_connect(connect_task, my_generation))
+            raise TimeoutError(f"Realtime connect timed out after {_CONNECT_TIMEOUT_S:.0f}s")
+
+        manager, conn = connect_task.result()
+        self._manager = manager
+        self._conn = conn
+        self._recv_task = asyncio.create_task(self._recv_loop())
+        self._refresh_task = asyncio.create_task(self._proactive_refresh())
+
+    async def _adopt_late_connect(self, task: asyncio.Task, generation: int) -> None:
+        """Соединение, на которое мы перестали ждать, всё же поднялось.
+
+        Если с тех пор никто другой не подключился и это по-прежнему
+        последняя запрошенная попытка — жалко закрывать рабочее соединение
+        только потому, что оно не уложилось в таймаут. Если уже неактуально
+        (кто-то успел подключиться раньше, или пошла ещё более новая
+        попытка) — просто закрываем его.
+        """
+        try:
+            manager, conn = await task
+        except Exception:
+            log.exception("отложенная попытка поднять Realtime тоже не удалась")
+            return
+        if generation != self._connect_generation or self._conn is not None:
+            log.info("отложенное соединение с Realtime уже не нужно — закрываю")
+            with contextlib.suppress(Exception):
+                await manager.__aexit__(None, None, None)
+            return
+        log.info("отложенное соединение с Realtime всё же поднялось — использую его")
+        self._manager = manager
+        self._conn = conn
         self._recv_task = asyncio.create_task(self._recv_loop())
         self._refresh_task = asyncio.create_task(self._proactive_refresh())
 

@@ -1,7 +1,9 @@
 """Приём событий от облака не должен глушить отправку звука на колонку."""
 
 import asyncio
+import contextlib
 import types
+from pathlib import Path
 
 import app.realtime as realtime_mod
 from app.realtime import RealtimeVoice
@@ -364,32 +366,65 @@ async def test_reconnect_with_retry_gives_up_after_the_configured_attempts(monke
     assert len(attempts) == 2, "не больше настроенного числа попыток"
 
 
+class _ConnStub:
+    """Достаточно от `conn`, чтобы пройти session.update() и не дать
+    _recv_loop() сразу решить, что соединение уже закрылось само."""
+
+    async def _noop(self):
+        return None
+
+    def __init__(self):
+        self.session = types.SimpleNamespace(update=lambda **kw: self._noop())
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        await asyncio.sleep(999)  # «подключено, событий пока нет»
+
+
 class _HangingManager:
     """Как настоящий менеджер соединения, но __aenter__ никогда не отвечает.
 
-    Живой случай: сетевая заминка подвесила именно этот вызов на 14+ минут
+    Живой случай: сетевая заминка подвесила именно этот вызов на 11+ часов
     без единого исключения — start() ждал вечно, self._conn оставался None
-    и это никого не удивляло: ошибки-то не было."""
-
-    def __init__(self):
-        self.aexit_called = False
+    и это никого не удивляло: ошибки-то не было. Обернуть ожидание в
+    asyncio.wait_for тоже не решение (см. коммент у _adopt_late_connect):
+    если сам вызов внутри SDK не откликается на отмену, wait_for всё равно
+    ждёт его настоящего конца. Единственный надёжный выход — asyncio.wait()
+    без отмены: не дождались — просто перестаём ждать."""
 
     async def __aenter__(self):
         await asyncio.sleep(999)
 
     async def __aexit__(self, *exc):
-        self.aexit_called = True
+        return None
+
+
+def _voice_for_connect_tests():
+    voice = RealtimeVoice.__new__(RealtimeVoice)
+    voice._refresh_task = None
+    voice._connect_generation = 0
+    voice._conn = None
+    voice._manager = None
+    voice._history = []
+    voice._summary = ""
+    voice._settings = types.SimpleNamespace(
+        openai_realtime_model="gpt-realtime",
+        realtime_retention_ratio=0.6,
+        realtime_context_tokens=4000,
+        openai_voice="marin",
+        notes_dir=Path("/nonexistent-notes-dir-for-tests"),
+    )
+    return voice
 
 
 async def test_start_gives_up_instead_of_hanging_forever(monkeypatch):
     monkeypatch.setattr(realtime_mod, "_CONNECT_TIMEOUT_S", 0.01)
-    voice = RealtimeVoice.__new__(RealtimeVoice)
-    voice._refresh_task = None
-    manager = _HangingManager()
+    voice = _voice_for_connect_tests()
     voice._client = types.SimpleNamespace(
-        realtime=types.SimpleNamespace(connect=lambda model: manager)
+        realtime=types.SimpleNamespace(connect=lambda model: _HangingManager())
     )
-    voice._settings = types.SimpleNamespace(openai_realtime_model="gpt-realtime")
 
     raised = False
     try:
@@ -400,7 +435,71 @@ async def test_start_gives_up_instead_of_hanging_forever(monkeypatch):
     assert raised, "зависшее подключение должно превращаться в быструю ошибку"
     assert voice._conn is None
     assert voice._manager is None
-    assert manager.aexit_called, "частично открытое соединение нужно закрыть, а не бросить"
+
+
+async def test_late_connect_is_adopted_if_still_the_current_attempt(monkeypatch):
+    """Соединение поднялось позже отведённого времени, но так и осталось
+    единственной попыткой — жалко его выбрасывать только за опоздание."""
+    monkeypatch.setattr(realtime_mod, "_CONNECT_TIMEOUT_S", 0.05)
+    voice = _voice_for_connect_tests()
+
+    class _SlowManager:
+        async def __aenter__(self):
+            await asyncio.sleep(0.2)  # дольше таймаута, но не бесконечно
+            return _ConnStub()
+
+        async def __aexit__(self, *exc):
+            return None
+
+    voice._client = types.SimpleNamespace(
+        realtime=types.SimpleNamespace(connect=lambda model: _SlowManager())
+    )
+
+    with contextlib.suppress(TimeoutError):
+        await voice.start([], "")
+    assert voice._conn is None, "пока не должно быть готово"
+
+    await asyncio.sleep(0.3)  # дать фоновой adopt-задаче время сработать
+
+    assert voice._conn is not None, "опоздавшее соединение должно было прижиться"
+    assert voice._recv_task is not None
+    voice._recv_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError, Exception):
+        await voice._recv_task
+    voice._refresh_task.cancel()
+
+
+async def test_late_connect_is_discarded_if_something_else_already_connected(monkeypatch):
+    """Пока первая попытка опаздывала, вторая (или ретрай) уже подключилась
+    — опоздавшая не должна перезаписать рабочее соединение."""
+    monkeypatch.setattr(realtime_mod, "_CONNECT_TIMEOUT_S", 0.05)
+    voice = _voice_for_connect_tests()
+
+    closed = asyncio.Event()
+
+    class _SlowManager:
+        async def __aenter__(self):
+            await asyncio.sleep(0.2)
+            return _ConnStub()
+
+        async def __aexit__(self, *exc):
+            closed.set()
+
+    voice._client = types.SimpleNamespace(
+        realtime=types.SimpleNamespace(connect=lambda model: _SlowManager())
+    )
+
+    with contextlib.suppress(TimeoutError):
+        await voice.start([], "")
+
+    # Пока первая попытка ещё в пути, кто-то другой уже подключился напрямую.
+    sentinel = object()
+    voice._conn = sentinel
+
+    await asyncio.sleep(0.3)
+
+    assert voice._conn is sentinel, "опоздавшее соединение не должно было его подвинуть"
+    assert closed.is_set(), "а само оно должно было закрыться, а не повиснуть открытым"
 
 
 class _FakeConn:

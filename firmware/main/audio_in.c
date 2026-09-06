@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "driver/i2s_std.h"
+#include "esp_agc.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -10,18 +11,26 @@
 static const char *TAG = "audio_in";
 
 // INMP441 отдаёт 24 бита в 32-битном слоте и по меркам линейного входа тихий.
-// AGC во фронтенде (esp_afe, agc_init) стоит ПОСЛЕ WakeNet в конвейере
-// (см. лог загрузки: AEC -> WakeNet -> AGC) — активационное слово ищется
-// по этому, ещё не усиленному сигналу, и его чувствительность упирается
-// именно в этот сдвиг, а не в AGC. Было 14 (речь на слух нормальной
-// громкости с метра-двух) — активационное слово при этом приходилось
-// почти кричать. 12 поднимает уровень ещё вчетверо.
-// Если звук клиппит на обычной комнатной громкости — увеличьте сдвиг;
-// если активационное слово всё ещё не слышно издалека — уменьшите.
+// Было 14 (речь на слух нормальной громкости с метра-двух) — активационное
+// слово при этом приходилось почти кричать. 12 поднимает уровень ещё
+// вчетверо. Дальше выравнивание берёт на себя AGC ниже — этот сдвиг только
+// задаёт стартовый уровень до него, важно не клиппить ДО AGC (см. IF ниже):
+// обрезанный по int16 пик обратно не восстановить, лимитер AGC спасает
+// только то, что клиппится уже ПОСЛЕ его усиления.
 #define MIC_SHIFT 12
+
+// Собственный AGC (WebRTC, из той же библиотеки esp-sr) — в отличие от
+// agc_init во фронтенде (audio_frontend.c), который стоит ПОСЛЕ WakeNet в
+// конвейере (AEC -> WakeNet -> AGC, см. лог загрузки), этот применяется
+// прямо тут, ДО фронтенда: активационное слово и распознавание команды
+// после него получают уже выровненный по громкости сигнал, а не голый.
+// Статичного MIC_SHIFT недостаточно — комфортно ни для громкого голоса
+// вплотную (клиппинг), ни для тихого издалека (не слышно) сразу.
+#define AGC_FRAME_SAMPLES (HAPPY_MIC_SAMPLE_RATE / 100)  // 10 мс — так хочет esp_agc_process
 
 static i2s_chan_handle_t s_rx;
 static volatile bool s_recording;
+static void *s_agc;
 
 static esp_err_t init_i2s(void)
 {
@@ -55,6 +64,7 @@ static void mic_task(void *arg)
 {
     static int32_t raw[HAPPY_MIC_FRAME_SAMPLES];
     static int16_t pcm[HAPPY_MIC_FRAME_SAMPLES];
+    static int16_t leveled[HAPPY_MIC_FRAME_SAMPLES];
 
     while (true) {
         size_t read = 0;
@@ -73,16 +83,47 @@ static void mic_task(void *arg)
             if (value < INT16_MIN) value = INT16_MIN;
             pcm[i] = (int16_t)value;
         }
-        // Эхоподавитель вычитает то, что играет сама колонка, автоусиление
-        // подтягивает далёкий голос. Кадры у него своей длины, поэтому
-        // отправкой занимается колбэк, а не этот цикл.
-        happy_frontend_process(pcm, samples);
+
+        const int16_t *out = pcm;
+        if (s_agc != NULL) {
+            // esp_agc_process ждёt кадры ровно по 10 мс — режем на куски,
+            // хвост меньше 10 мс (бывает при неполном чтении DMA) просто
+            // копируем как есть, чтобы не потерять его вовсе.
+            size_t off = 0;
+            for (; off + AGC_FRAME_SAMPLES <= samples; off += AGC_FRAME_SAMPLES) {
+                esp_agc_process(s_agc, (int16_t *)pcm + off, leveled + off,
+                                 AGC_FRAME_SAMPLES, HAPPY_MIC_SAMPLE_RATE);
+            }
+            if (off < samples) {
+                memcpy(leveled + off, pcm + off, (samples - off) * sizeof(int16_t));
+            }
+            out = leveled;
+        }
+
+        // Эхоподавитель вычитает то, что играет сама колонка. Кадры у него
+        // своей длины, поэтому отправкой занимается колбэк, а не этот цикл.
+        happy_frontend_process(out, samples);
     }
 }
 
 esp_err_t happy_audio_in_start(void)
 {
     ESP_ERROR_CHECK(init_i2s());
+
+    // AGC_MODE_2 — цифровой AGC (в отличие от AGC_MODE_1, не эмулирует
+    // аналоговый тракт, предсказуемее на цифровом входе вроде нашего).
+    // target_level_dbfs -3 — библиотечное значение по умолчанию, ближе к
+    // максимуму без клиппинга: чем меньше запас, тем лучше отношение
+    // сигнал/шум для WakeNet и распознавания. limiter_enable=1 обязателен —
+    // это единственная защита от клиппинга ПОСЛЕ усиления (то, что уже
+    // клиппировано до AGC самим MIC_SHIFT, он не восстановит).
+    s_agc = esp_agc_open(AGC_MODE_2, HAPPY_MIC_SAMPLE_RATE);
+    if (s_agc != NULL) {
+        set_agc_config(s_agc, /*gain_dB=*/0, /*limiter_enable=*/1, /*target_level_dbfs=*/-3);
+    } else {
+        ESP_LOGW(TAG, "AGC не поднялся — работаю с фиксированным усилением");
+    }
+
     if (xTaskCreate(mic_task, "mic", 4096, NULL, 6, NULL) != pdPASS) {
         return ESP_FAIL;
     }

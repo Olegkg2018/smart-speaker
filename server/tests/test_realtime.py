@@ -193,6 +193,45 @@ async def test_proactive_refresh_swaps_connection_when_idle():
     assert voice._reconnecting is False, "флаг должен сброситься после пересборки"
 
 
+async def test_proactive_refresh_does_not_cancel_itself():
+    """Живой случай, самый частый из всех: `self._refresh_task` — это и
+    есть задача, выполняющая `_proactive_refresh()`. Когда час истекает, она
+    сама вызывает `start()`, а первая строчка `start()` раньше звала
+    `self._refresh_task.cancel()` — то есть отменяла САМА СЕБЯ. Cancel()
+    на текущей задаче не убивает мгновенно: CancelledError влетает на
+    ближайшей же точке await (тут же, внутри start()) и тихо гасит всю
+    цепочку — ни ошибки в логе, ни новой попытки, self._conn остаётся None
+    навсегда. Ровно так объяснялись все «зависания на часы»: не сетевая
+    заминка, а самоотмена. Тест воспроизводит один в один: настоящий
+    _proactive_refresh, запущенный как настоящая self._refresh_task, с
+    настоящим (не подменённым) start()."""
+    voice = _voice_for_connect_tests()
+    voice._conn = object()  # была рабочая сессия
+    voice._recv_task = None
+    voice._speaking = False
+    voice._reconnecting = False
+    voice._client = types.SimpleNamespace(
+        realtime=types.SimpleNamespace(connect=lambda model: _FastManager())
+    )
+
+    refresh_task = asyncio.create_task(voice._proactive_refresh(delay_s=0))
+    voice._refresh_task = refresh_task
+    await asyncio.wait_for(refresh_task, timeout=2)
+
+    assert voice._conn is not None, "самоотмена не должна была погасить обновление"
+    assert voice._reconnecting is False
+
+    # Уборка: start() внутри уже поставил новый recv_task/refresh_task
+    # (следующий цикл обновления) — оба не нужны после теста.
+    voice._recv_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError, Exception):
+        await voice._recv_task
+    if voice._refresh_task is not None:
+        voice._refresh_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await voice._refresh_task
+
+
 async def test_proactive_refresh_does_not_wait_for_old_connection_to_close():
     """Живой случай: закрытие СТАРОГО соединения зависло на минуты.
 
@@ -381,6 +420,16 @@ class _ConnStub:
 
     async def __anext__(self):
         await asyncio.sleep(999)  # «подключено, событий пока нет»
+
+
+class _FastManager:
+    """Обычное, ничем не примечательное соединение — подключается сразу."""
+
+    async def __aenter__(self):
+        return _ConnStub()
+
+    async def __aexit__(self, *exc):
+        return None
 
 
 class _HangingManager:

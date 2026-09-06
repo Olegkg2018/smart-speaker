@@ -200,9 +200,18 @@ class RealtimeVoice:
         # остаётся с мёртвым соединением — слушает команды, но не отвечает.
         self._history = history
         self._summary = summary
-        if self._refresh_task is not None:
-            # Обновление таймера привязано к возрасту КОНКРЕТНОГО соединения —
-            # старый отсчёт от предыдущего start() тут ни при чём.
+        # Обновление таймера привязано к возрасту КОНКРЕТНОГО соединения —
+        # старый отсчёт от предыдущего start() тут ни при чём. НО: когда час
+        # истекает, именно _proactive_refresh (тело self._refresh_task) сама
+        # вызывает start() — а значит self._refresh_task тут может оказаться
+        # ссылкой на ТЕКУЩУЮ выполняющуюся задачу. cancel() на себе не убивает
+        # мгновенно — CancelledError влетает на следующей же точке await
+        # (тут же, в asyncio.wait ниже) и тихо гасит всю цепочку задач:
+        # ни ошибки в логе, ни новой попытки, self._conn остаётся None
+        # навсегда. Это и было настоящей причиной «зависаний на часы» — все
+        # прошлые правки (таймауты на connect/close) были не лишними, но
+        # лечили не тот симптом.
+        if self._refresh_task is not None and self._refresh_task is not asyncio.current_task():
             self._refresh_task.cancel()
 
         self._connect_generation += 1

@@ -210,6 +210,26 @@ open() ничем не отличается от обёртки вокруг clo
 the_current_attempt`, `test_late_connect_is_discarded_if_something_else_
 already_connected`.
 
+Шестой случай — и это была настоящая причина всех пяти предыдущих: не
+сетевая заминка, а самоотмена. `self._refresh_task` — это и есть задача,
+исполняющая `_proactive_refresh()`. Когда час истекает, она сама вызывает
+`start()`, а первая строчка `start()` звала `self._refresh_task.cancel()` —
+то есть отменяла саму себя. `cancel()` на текущей задаче не убивает
+мгновенно: `CancelledError` влетает на ближайшей же точке `await` (тут же,
+внутри `start()`) и тихо гасит всю цепочку задач — не пойман веткой
+`except Exception` (`CancelledError` с 3.8 — не `Exception`), в логе ни
+строки, `self._conn` остаётся `None` навсегда, никто больше не пробует
+переподключиться. Ровно так и выглядело: активацию слышит, а голос
+собеседника — нет, и «секунду, переподключаюсь» на каждой попытке. Все
+таймауты на connect/close из случаев 3–5 были не лишними (это реальная
+защита от настоящих сетевых зависаний), но лечили не тот симптом. Фикс —
+`if self._refresh_task is not None and self._refresh_task is not
+asyncio.current_task(): self._refresh_task.cancel()`. Тест
+(`test_proactive_refresh_does_not_cancel_itself`) воспроизводит один в
+один: настоящий `_proactive_refresh`, запущенный как настоящая
+`self._refresh_task`, с настоящим `start()` — без фикса падает с той же
+`CancelledError` из `asyncio.wait()` внутри `start()`, что и в проде.
+
 ## Внешние сервисы
 
 **YouTube не отдаёт аудио** с серверных адресов: скачивание получает 403,
@@ -282,7 +302,7 @@ Piper RTF 0.57, Silero v3 RTF ~0.9 после прогрева. Прогрев S
 ## Тесты
 
 ```bash
-cd server && python3 -m pytest    # 231 тестов
+cd server && python3 -m pytest    # 232 теста
 ```
 
 Запускать именно из `server/`: в корне не подхватывается `asyncio_mode`

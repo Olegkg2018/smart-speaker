@@ -232,7 +232,18 @@ class RealtimeVoice:
                             "input": {
                                 "format": {"type": "audio/pcm", "rate": _REALTIME_RATE},
                                 "turn_detection": None,
-                                "transcription": {"model": "whisper-1"},
+                                # Без явного языка Whisper пытается угадать его
+                                # по звуку — и на нечётком сигнале иногда
+                                # ошибается вслепую: транскрипции на польском,
+                                # немецком, хинди вместо русской речи. Модель
+                                # сама слушает аудио напрямую (это только для
+                                # записи в память), но мусорный чужеязычный
+                                # текст оттуда всё равно раньше протекал в
+                                # сводку (см. «Ольга Билан» в CLAUDE.md).
+                                "transcription": {
+                                    "model": "whisper-1",
+                                    "language": self._settings.whisper_language,
+                                },
                             },
                             "output": {
                                 "format": {"type": "audio/pcm", "rate": _REALTIME_RATE},

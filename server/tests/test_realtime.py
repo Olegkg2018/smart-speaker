@@ -463,6 +463,7 @@ def _voice_for_connect_tests():
         realtime_retention_ratio=0.6,
         realtime_context_tokens=4000,
         openai_voice="marin",
+        whisper_language="ru",
         notes_dir=Path("/nonexistent-notes-dir-for-tests"),
     )
     return voice

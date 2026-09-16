@@ -35,6 +35,13 @@ static const char *TAG = "audio_in";
 static i2s_chan_handle_t s_rx;
 static volatile bool s_recording;
 static void *s_agc;
+static happy_raw_level_cb_t s_on_level;
+static uint16_t s_smoothed_level;
+static int s_level_divider;
+// Кадр микрофона — 20 мс; отдаём наружу раз в ~100 мс, а не на каждый
+// кадр — серверу для сравнения громкости этого достаточно, а JSON на
+// каждые 20 мс просто грузил бы канал зря.
+#define RAW_LEVEL_REPORT_EVERY 5
 
 static esp_err_t init_i2s(void)
 {
@@ -81,11 +88,26 @@ static void mic_task(void *arg)
         // Отправкой на сервер занимается колбэк — он и смотрит на s_recording.
 
         const size_t samples = read / sizeof(int32_t);
+        uint32_t abs_sum = 0;
         for (size_t i = 0; i < samples; i++) {
             int32_t value = raw[i] >> MIC_SHIFT;
             if (value > INT16_MAX) value = INT16_MAX;
             if (value < INT16_MIN) value = INT16_MIN;
             pcm[i] = (int16_t)value;
+            abs_sum += (uint32_t)(value < 0 ? -value : value);
+        }
+
+        // Уровень ДО автоусиления (esp_agc_process ниже) — то, что реально
+        // нужно серверу: AGC специально стирает разницу в громкости
+        // источников, а окну продолжения разговора эта разница и нужна
+        // (см. app/audio/speaker_level.py на сервере).
+        if (s_on_level != NULL && samples > 0) {
+            uint16_t level = (uint16_t)(abs_sum / samples);
+            s_smoothed_level = (uint16_t)((s_smoothed_level * 3 + level) / 4);
+            if (++s_level_divider >= RAW_LEVEL_REPORT_EVERY) {
+                s_level_divider = 0;
+                s_on_level(s_smoothed_level);
+            }
         }
 
         const int16_t *out = pcm;
@@ -110,8 +132,9 @@ static void mic_task(void *arg)
     }
 }
 
-esp_err_t happy_audio_in_start(void)
+esp_err_t happy_audio_in_start(happy_raw_level_cb_t on_level)
 {
+    s_on_level = on_level;
     ESP_ERROR_CHECK(init_i2s());
 
     // AGC_MODE_2 — цифровой AGC (в отличие от AGC_MODE_1, не эмулирует

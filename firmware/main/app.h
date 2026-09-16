@@ -68,9 +68,16 @@ esp_err_t happy_ws_send_mic(const uint8_t *payload, size_t len);
 esp_err_t happy_ws_send_mic_raw(const uint8_t *payload, size_t len);
 esp_err_t happy_ws_send_json(const char *json);
 happy_state_t happy_ws_state(void);
+// Сервер согласился принимать mic_level (поле "levels" в "ready") — до
+// этого момента слать их незачем, старый сервер их просто не поймёт.
+bool happy_ws_should_report_levels(void);
 
 // --- аудио ---
-esp_err_t happy_audio_in_start(void);
+// Сырой (ДО автоусиления на плате) уровень громкости — раз в ~100 мс, для
+// окна продолжения разговора на сервере (см. app/audio/speaker_level.py):
+// там нужна разница в громкости источников, а AGC её как раз стирает.
+typedef void (*happy_raw_level_cb_t)(uint16_t level);
+esp_err_t happy_audio_in_start(happy_raw_level_cb_t on_level);
 void happy_audio_in_set_recording(bool recording);
 // Микрофон слушает всегда — ради активационного слова. Этот флаг говорит
 // лишь о том, уходит ли звук на сервер.

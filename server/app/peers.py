@@ -41,6 +41,11 @@ class Peer:
         # кого слушать.
         self._level = 0.0
         self._level_at = 0.0
+        # Сырой (до автоусиления на плате) уровень из mic_level — для окна
+        # продолжения разговора (app/audio/speaker_level.py). None, пока
+        # устройство ни разу не прислало ни одного mic_level: со старой
+        # прошивкой или до первого кадра фича не должна активироваться.
+        self._raw_level: float | None = None
 
     @property
     def has_speaker(self) -> bool:
@@ -67,6 +72,14 @@ class Peer:
         if age >= _LEVEL_DECAY_S:
             return 0.0
         return self._level * (1.0 - age / _LEVEL_DECAY_S)
+
+    def note_raw_level(self, value: float) -> None:
+        """Запоминает сырой (до AGC на плате) уровень из mic_level."""
+        self._raw_level = value
+
+    @property
+    def raw_level(self) -> float | None:
+        return self._raw_level
 
     def __repr__(self) -> str:
         return f"<Peer {self.device} {self.role} level={self.level:.0f}>"
@@ -160,6 +173,17 @@ class PeerSet:
     def release_active(self) -> None:
         """Реплика кончилась — следующий раз выбираем заново."""
         self._active = None
+
+    def keep_active(self, peer: Peer) -> Peer | None:
+        """Продолжает слушать то же устройство, не выбирая заново.
+
+        Для окна продолжения разговора: выбор микрофона уже сделан
+        предыдущей репликой, и сравнение сырого уровня (см.
+        app/audio/speaker_level.py) имеет смысл только на том же самом
+        устройстве — у разных микрофонов разное фиксированное усиление.
+        """
+        self._active = peer if peer in self._peers else None
+        return self._active
 
     def accepts_audio(self, peer: Peer) -> bool:
         """Брать ли звук этого устройства в распознавание.

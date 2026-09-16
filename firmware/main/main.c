@@ -91,6 +91,21 @@ static void on_wake_word(void)
     }
 }
 
+static void on_raw_level(uint16_t level)
+{
+    // Сырой уровень нужен только пока сервер действительно слушает — вне
+    // реплики его не с чем сравнивать, а трафик впустую. Проверка
+    // happy_ws_should_report_levels() бережёт и старый сервер: он это
+    // поле в "ready" не пришлёт, и мы просто не будем ничего слать.
+    if (!happy_ws_connected() || !happy_audio_in_is_recording() ||
+        !happy_ws_should_report_levels()) {
+        return;
+    }
+    char msg[40];
+    snprintf(msg, sizeof(msg), "{\"t\":\"mic_level\",\"raw\":%u}", (unsigned)level);
+    happy_ws_send_json(msg);
+}
+
 // Сколько колонка терпит отсутствие связи, прежде чем перезагрузиться сама.
 // Клиент WebSocket переподключается сам, но иногда стек залипает так, что
 // переподключение не помогает: колонка молчит и на слово, и на кнопку, и
@@ -148,7 +163,7 @@ void app_main(void)
     ESP_ERROR_CHECK(happy_wake_cache_start());
     // Обработку поднимаем до микрофона: он сразу начнёт гнать через неё звук.
     ESP_ERROR_CHECK(happy_frontend_start(send_mic_frame, on_wake_word));
-    ESP_ERROR_CHECK(happy_audio_in_start());
+    ESP_ERROR_CHECK(happy_audio_in_start(on_raw_level));
     ESP_ERROR_CHECK(happy_button_start(on_button));
 
     ESP_ERROR_CHECK(happy_wifi_start());

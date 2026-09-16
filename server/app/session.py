@@ -13,6 +13,7 @@ from fastapi import WebSocket
 
 from app.audio.codec import Codec, make_codec
 from app.audio.mixer import AudioMixer
+from app.audio.speaker_level import SpeakerLevel
 from app.audio.vad import SilenceDetector
 from app.config import Settings
 from app import memory_summary
@@ -65,6 +66,15 @@ _CATCHUP_LIMIT_S = 0.150
 # репликой — 45 с щедро выше любого легитимного вызова инструмента.
 _STATE_WATCHDOG_S = 45.0
 
+# Запас поверх followup_window_s для резервного сторожа окна продолжения
+# разговора (_watch_followup). Основной путь закрытия окна — по-кадровый
+# таймаут в _on_binary, но он не сработает вовсе, если ни один кадр так и
+# не прошёл проверку по громкости (SpeakerLevel.accepts) — например, в
+# комнате всё это время был только фон. Этот сторож не зависит от прихода
+# кадров вообще, по образцу уже пойманных в этом проекте зависаний state
+# machine (см. CLAUDE.md).
+_FOLLOWUP_WATCHDOG_MARGIN_S = 2.0
+
 
 class Session:
     def __init__(
@@ -100,7 +110,7 @@ class Session:
             push_audio=self._mixer.push_speech,
             drop_audio=self._mixer.drop_speech,
             wait_drained=self._wait_speech_drained,
-            turn_done=self._set_idle,
+            turn_done=self._finish_turn,
             save_turn=self._save_turn,
         )
         self._memory: ConversationMemory | None = None
@@ -129,6 +139,12 @@ class Session:
         self._sender: asyncio.Task | None = None
         self._notifier: TelegramNotifier | None = None
         self._state_watchdog: asyncio.Task | None = None
+        # Продолжение разговора без нового активационного слова — см.
+        # _finish_turn/_start_followup_window.
+        self._speaker_level = SpeakerLevel(settings.followup_speaker_min_ratio)
+        self._in_followup = False
+        self._last_active_peer: Peer | None = None
+        self._followup_watchdog: asyncio.Task | None = None
 
 
     # ---------- рассылка устройствам ----------
@@ -195,6 +211,11 @@ class Session:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._state_watchdog
             self._state_watchdog = None
+        if self._followup_watchdog is not None:
+            self._followup_watchdog.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._followup_watchdog
+            self._followup_watchdog = None
         await self._shutdown()
 
     async def _shutdown(self) -> None:
@@ -220,7 +241,7 @@ class Session:
             if (data := packet.get("bytes")) is not None:
                 await self._on_binary(peer, data)
             elif (text := packet.get("text")) is not None:
-                await self._on_text(text)
+                await self._on_text(peer, text)
 
     async def _on_binary(self, peer: Peer, frame: bytes) -> None:
         kind, payload = unpack_audio(frame)
@@ -247,18 +268,42 @@ class Session:
                 self._vad.observe_noise(pcm)
             return
 
+        if self._in_followup and not self._speaker_level.accepts(peer.raw_level):
+            # Похоже на чужой голос или фон, а не на того, кто говорил
+            # перед ответом — не считаем ни речью, ни командой, просто
+            # продолжаем ждать в пределах окна продолжения.
+            return
+        if self._in_followup:
+            # Прошло проверку — это продолжение того же разговора; дальше
+            # обычные правила конца реплики по тишине, без повторной сверки
+            # на середине фразы (голос, ставший тише, не должен её обрезать).
+            self._in_followup = False
+            self._clear_followup_watchdog()
+
         self._mic_bytes += len(pcm)
         await self._voice.feed(pcm)
-        if self._vad.feed(pcm):
+        ended = self._vad.feed(pcm)
+        self._speaker_level.observe(peer.raw_level, self._vad.is_speech)
+        if ended:
             await self._stop_recording()
             return
 
         # Слово прозвучало, а команды не последовало — не держим микрофон
         # открытым: детектор тишины ждёт речи, которой не было, и сам
-        # реплику никогда не закроет.
+        # реплику никогда не закроет. В окне продолжения ждём короче —
+        # followup_window_s, а не полный wake_listen_timeout_s.
         if not self._vad.heard_speech:
-            if time.monotonic() - self._listen_started > self._settings.wake_listen_timeout_s:
-                log.info("после активации ничего не сказали — снова жду слово")
+            limit = (
+                self._settings.followup_window_s
+                if self._in_followup
+                else self._settings.wake_listen_timeout_s
+            )
+            if time.monotonic() - self._listen_started > limit:
+                log.info(
+                    "продолжение не услышано — снова жду слово"
+                    if self._in_followup else
+                    "после активации ничего не сказали — снова жду слово"
+                )
                 await self._cancel_recording()
                 return
 
@@ -267,7 +312,7 @@ class Session:
             log.warning("реплика длиннее %d с — обрываю запись", _MAX_UTTERANCE_S)
             await self._stop_recording()
 
-    async def _on_text(self, raw: str) -> None:
+    async def _on_text(self, peer: Peer, raw: str) -> None:
         try:
             msg: dict[str, Any] = json.loads(raw)
         except json.JSONDecodeError:
@@ -276,7 +321,15 @@ class Session:
 
         match msg.get("t"):
             case "hello":
-                await self._on_hello(msg)
+                # Настоящий hello уже обработан один раз при подключении
+                # (serve() зовёт _on_hello напрямую) — сюда попадает только
+                # повторный, если устройство вдруг пришлёт его снова.
+                await self._on_hello(peer, msg)
+            case "mic_level":
+                # Сырой (до автоусиления на плате) уровень громкости — для
+                # окна продолжения разговора, см. app/audio/speaker_level.py
+                # и firmware/main/audio_in.c.
+                peer.note_raw_level(float(msg.get("raw", 0.0)))
             case "ptt":
                 # Тап вместо удержания: одно и то же сообщение либо
                 # начинает слушать, либо (если уже слушаем) досрочно
@@ -305,7 +358,14 @@ class Session:
             codec_name, self._settings.mic_sample_rate, self._settings.frame_samples_mic
         )
         with contextlib.suppress(Exception):
-            await peer.ws.send_json({"t": "ready", "codec": peer.codec.name})
+            await peer.ws.send_json({
+                "t": "ready",
+                "codec": peer.codec.name,
+                # Со старой прошивкой поле просто игнорируется — окно
+                # продолжения тогда не активируется вовсе (нет mic_level),
+                # чистый откат к обычному вопрос-ответу.
+                "levels": self._settings.followup_enabled,
+            })
 
         if not peer.has_speaker:
             # Сателлит не играет звук сам, но громкость physической колонки
@@ -482,6 +542,9 @@ class Session:
         if not self._recording:
             return
         self._recording = False
+        self._clear_followup_watchdog()
+        self._in_followup = False
+        self._last_active_peer = self._peers.active
         self._mixer.set_listening(False)
         self._peers.release_active()
 
@@ -495,6 +558,7 @@ class Session:
             await self._set_idle()
             return
 
+        self._speaker_level.capture_reference()
         await self._voice.end_utterance()
 
     async def _cancel_recording(self) -> None:
@@ -502,10 +566,71 @@ class Session:
         if not self._recording:
             return
         self._recording = False
+        self._clear_followup_watchdog()
+        self._in_followup = False
         self._mixer.set_listening(False)
         self._peers.release_active()
         await self._voice.barge_in()
         await self._set_idle()
+
+    async def _finish_turn(self) -> None:
+        """Ответ доигран.
+
+        Обычно — в IDLE; но если включено продолжение разговора, ответ дан
+        не поверх музыки, и у последнего говорившего устройства уже есть
+        эталон сырого уровня (то есть прошивка умеет слать mic_level) —
+        вместо IDLE открываем короткое окно продолжения: колонка недолго
+        слушает без нового активационного слова. Без эталона (старая
+        прошивка, или устройство ещё не прислало ни одного mic_level)
+        фича молча не активируется — чистый откат к обычному вопрос-ответу.
+        """
+        peer = self._last_active_peer
+        if (
+            self._settings.followup_enabled
+            and not self._mixer.is_playing
+            and peer is not None
+            and peer in self._peers.all()
+            and peer.raw_level is not None
+        ):
+            await self._start_followup_window(peer)
+        else:
+            await self._set_idle()
+
+    async def _start_followup_window(self, peer: Peer) -> None:
+        self._peers.keep_active(peer)
+        await self._voice.begin_utterance()
+        self._mic_bytes = 0
+        self._vad.reset()
+        self._speaker_level.reset()
+        self._listen_started = time.monotonic()
+        self._recording = True
+        self._in_followup = True
+        self._mixer.set_listening(True)
+        self._clear_followup_watchdog()
+        self._followup_watchdog = asyncio.create_task(self._watch_followup())
+        # Переход в LISTENING — это и есть команда прошивке открыть
+        # микрофон (см. firmware/main/ws_client.c::handle_text, ветка
+        # "state"): новый исходящий тип сообщения не нужен.
+        await self._set_state(State.LISTENING)
+
+    async def _watch_followup(self) -> None:
+        await asyncio.sleep(self._settings.followup_window_s + _FOLLOWUP_WATCHDOG_MARGIN_S)
+        if not self._in_followup:
+            return
+        log.warning("окно продолжения не закрылось само — принудительно возвращаюсь в IDLE")
+        self._in_followup = False
+        # Не через _clear_followup_watchdog(): она отменяет
+        # self._followup_watchdog, а это и есть текущая задача —
+        # самоотмена оборвала бы _cancel_recording() на первом же await
+        # (тот же баг, что был с self._refresh_task.cancel() на себе же в
+        # realtime.py — см. CLAUDE.md, шестой случай зависания).
+        self._followup_watchdog = None
+        await self._cancel_recording()
+
+    def _clear_followup_watchdog(self) -> None:
+        if self._followup_watchdog is not None:
+            self._followup_watchdog.cancel()
+            self._followup_watchdog = None
 
     async def _announce(self, text: str) -> None:
         """Реплика по инициативе сервера — например, сработавший таймер.
@@ -642,6 +767,8 @@ class Session:
             state.value, _STATE_WATCHDOG_S,
         )
         self._recording = False
+        self._clear_followup_watchdog()
+        self._in_followup = False
         self._peers.release_active()
         with contextlib.suppress(Exception):
             await self._voice.barge_in()

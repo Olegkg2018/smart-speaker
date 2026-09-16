@@ -21,6 +21,10 @@ static volatile happy_state_t s_state = HAPPY_STATE_IDLE;
 // когда обе стороны согласились. По умолчанию false: до подтверждения
 // безопаснее считать, что идёт PCM, как было раньше этой правки.
 static volatile bool s_codec_opus_active;
+// Сервер подтвердил, что понимает mic_level (поле "levels" в "ready") —
+// нужен для окна продолжения разговора, см. app/audio/speaker_level.py.
+// По умолчанию false: старый сервер это поле не пришлёт вовсе.
+static volatile bool s_report_levels;
 
 // Сборка фрагментированных сообщений: esp_websocket_client отдаёт длинные
 // пакеты по частям, и тогда payload_offset > 0.
@@ -85,6 +89,8 @@ static void handle_text(const char *data, size_t len)
         s_codec_opus_active = happy_opus_available() && cJSON_IsString(codec) &&
                                strcmp(codec->valuestring, "opus") == 0;
         ESP_LOGI(TAG, "кодек согласован: %s", s_codec_opus_active ? "opus" : "pcm");
+        const cJSON *levels = cJSON_GetObjectItemCaseSensitive(root, "levels");
+        s_report_levels = cJSON_IsTrue(levels);
     } else if (cJSON_IsString(type) && strcmp(type->valuestring, "text") == 0 &&
                cJSON_IsString(value)) {
         // Цветной экран рисует сама плата, поэтому с сервера приходит
@@ -131,6 +137,7 @@ static void on_ws_event(void *arg, esp_event_base_t base, int32_t id, void *even
         s_connected = true;
         s_assembly_len = 0;
         s_codec_opus_active = false;  // до подтверждения сервером в ready
+        s_report_levels = false;      // то же самое для mic_level
         happy_opus_reset();
         send_hello();
         // Микрофон включит либо активационное слово, либо кнопка — слать
@@ -248,6 +255,11 @@ void happy_ws_restart(void)
 happy_state_t happy_ws_state(void)
 {
     return s_state;
+}
+
+bool happy_ws_should_report_levels(void)
+{
+    return s_report_levels;
 }
 
 // Заголовок и данные должны уйти одним фреймом, поэтому склеиваем. Буфер

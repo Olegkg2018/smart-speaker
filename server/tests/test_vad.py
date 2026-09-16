@@ -109,3 +109,12 @@ def test_fixed_threshold_mode_ignores_noise():
     for _ in range(200):
         vad.observe_noise(_chunk(300, 20))
     assert vad.threshold == 400
+
+
+def test_is_speech_reflects_last_fed_frame():
+    vad = _detector(threshold=400)
+    assert vad.is_speech is False
+    vad.feed(_chunk(2000, 20))
+    assert vad.is_speech is True
+    vad.feed(_chunk(0, 20))
+    assert vad.is_speech is False

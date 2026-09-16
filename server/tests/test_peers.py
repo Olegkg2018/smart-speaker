@@ -181,3 +181,44 @@ def test_evicting_the_active_source_frees_it():
 
     peers.add(_peer("kitchen"))
     assert peers.active is None
+
+
+# ---------- сырой уровень и продолжение разговора ----------
+
+
+def test_raw_level_starts_unknown():
+    """None — устройство ещё ни разу не прислало mic_level (старая
+    прошивка или до первого кадра): окно продолжения не должно
+    активироваться без этого сигнала."""
+    kitchen = _peer("kitchen")
+    assert kitchen.raw_level is None
+
+
+def test_note_raw_level_updates_value():
+    kitchen = _peer("kitchen")
+    kitchen.note_raw_level(123.0)
+    assert kitchen.raw_level == 123.0
+    kitchen.note_raw_level(45.0)
+    assert kitchen.raw_level == 45.0
+
+
+def test_keep_active_pins_the_given_device():
+    """Для окна продолжения выбор микрофона уже сделан — keep_active не
+    должен пересчитывать громкость заново, в отличие от choose_active."""
+    peers = PeerSet()
+    kitchen, phone = _peer("kitchen"), _peer("phone", ROLE_SATELLITE)
+    peers.add(kitchen)
+    peers.add(phone)
+    phone.note_audio(_pcm(9000))  # громче, но продолжение началось на kitchen
+
+    assert peers.keep_active(kitchen) is kitchen
+    assert peers.active is kitchen
+
+
+def test_keep_active_with_removed_device_clears_selection():
+    peers = PeerSet()
+    kitchen = _peer("kitchen")
+    peers.add(kitchen)
+    peers.remove(kitchen)
+    assert peers.keep_active(kitchen) is None
+    assert peers.active is None

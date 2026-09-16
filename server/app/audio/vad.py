@@ -35,6 +35,7 @@ class SilenceDetector:
         self._silence_samples = 0
         self._speech_samples = 0
         self._noise = float(threshold)
+        self._last_is_speech = False
 
     def reset(self) -> None:
         self._silence_samples = 0
@@ -45,6 +46,16 @@ class SilenceDetector:
     def heard_speech(self) -> bool:
         """Была ли вообще речь. Отличает «человек молчит» от «человек договорил»."""
         return self._speech_samples >= self._min_speech_samples
+
+    @property
+    def is_speech(self) -> bool:
+        """Был ли речью последний скормленный кадр.
+
+        Нужно тому, кто копит эталонный уровень говорящего (см.
+        app/audio/speaker_level.py) — считать в него только речевые
+        кадры, а не паузы.
+        """
+        return self._last_is_speech
 
     @property
     def threshold(self) -> float:
@@ -76,6 +87,7 @@ class SilenceDetector:
 
         level = float(np.abs(samples.astype(np.int32)).mean())
         is_speech = level >= self.threshold
+        self._last_is_speech = is_speech
 
         if not is_speech:
             # Фон подтягиваем только по тихим кускам и медленно: иначе

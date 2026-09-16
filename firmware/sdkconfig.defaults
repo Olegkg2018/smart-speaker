@@ -10,8 +10,10 @@ CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 
 # Активационное слово ищет сам ESP32: сервер перестаёт круглосуточно
 # принимать поток по Wi-Fi и считать распознавание. Английское слово
-# надёжнее русского — модель обучена именно на нём.
-CONFIG_SR_WN_WN9_COMPUTER_TTS=y
+# надёжнее русского — модель обучена именно на нём. Было WN9_COMPUTER_TTS
+# («компьютер») — сменили на «Джарвис»: обе модели предобучены в ESP-SR,
+# выбор — это Kconfig-опция, не отдельная тренировка.
+CONFIG_SR_WN_WN9_JARVIS_TTS=y
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_OCT=y
 CONFIG_SPIRAM_SPEED_80M=y

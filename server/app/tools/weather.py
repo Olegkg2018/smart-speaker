@@ -47,6 +47,20 @@ _WMO: dict[int, str] = {
 _WEEKDAYS = ["в понедельник", "во вторник", "в среду", "в четверг", "в пятницу",
              "в субботу", "в воскресенье"]
 
+# Те же коды WMO, но для виджета на /satellite — там место под текст, а не
+# под голос, эмодзи компактнее. Ключи совпадают с _WMO не полностью:
+# только то, что реально приходит в current.weather_code (не в daily).
+_WMO_ICON: dict[int, str] = {
+    0: "☀️", 1: "🌤️", 2: "⛅", 3: "☁️",
+    45: "🌫️", 48: "🌫️",
+    51: "🌦️", 53: "🌦️", 55: "🌦️", 56: "🌦️", 57: "🌦️",
+    61: "🌧️", 63: "🌧️", 65: "🌧️", 66: "🌧️", 67: "🌧️",
+    71: "🌨️", 73: "🌨️", 75: "🌨️", 77: "🌨️",
+    80: "🌦️", 81: "🌧️", 82: "⛈️",
+    85: "🌨️", 86: "🌨️",
+    95: "⛈️", 96: "⛈️", 99: "⛈️",
+}
+
 
 async def get_weather(
     city: str | None,
@@ -110,18 +124,55 @@ async def _forecast(
     if period == "week":
         return _week_line(name, daily)
 
-    current = data["current"]
-    temp = round(current["temperature_2m"])
-    feels = round(current["apparent_temperature"])
-    description = _WMO.get(current["weather_code"], "без осадков")
-    low = round(daily["temperature_2m_min"][0])
-    high = round(daily["temperature_2m_max"][0])
-
-    parts = [f"{name}: сейчас {temp} градусов, {description}"]
-    if abs(feels - temp) >= 3:
-        parts.append(f"ощущается как {feels}")
-    parts.append(f"днём от {low} до {high}")
+    now = _parse_current(data)
+    parts = [f"{name}: сейчас {now['temp']} градусов, {now['description']}"]
+    if abs(now["feels"] - now["temp"]) >= 3:
+        parts.append(f"ощущается как {now['feels']}")
+    parts.append(f"днём от {now['low']} до {now['high']}")
     return ", ".join(parts) + "."
+
+
+def _parse_current(data: dict) -> dict:
+    """Текущая погода как данные, а не фраза — общий разбор для голосового
+    ответа (_forecast) и структурного виджета (current_conditions)."""
+    current = data["current"]
+    daily = data["daily"]
+    code = current["weather_code"]
+    return {
+        "temp": round(current["temperature_2m"]),
+        "feels": round(current["apparent_temperature"]),
+        "description": _WMO.get(code, "без осадков"),
+        "icon": _WMO_ICON.get(code, "🌡️"),
+        "low": round(daily["temperature_2m_min"][0]),
+        "high": round(daily["temperature_2m_max"][0]),
+    }
+
+
+async def current_conditions(default_city: str, default_lat: float, default_lon: float) -> dict | None:
+    """Текущая погода домашней локации как данные — для /api/weather на
+    /satellite. В отличие от get_weather(), никогда не геокодирует город:
+    у киоска локация всегда одна и та же, заданная в настройках."""
+    try:
+        async with httpx.AsyncClient(timeout=8) as client:
+            response = await client.get(
+                _FORECAST_URL,
+                params={
+                    "latitude": default_lat,
+                    "longitude": default_lon,
+                    "current": "temperature_2m,apparent_temperature,weather_code,wind_speed_10m",
+                    "daily": "temperature_2m_max,temperature_2m_min,weather_code,"
+                             "precipitation_probability_max",
+                    "timezone": "auto",
+                    "forecast_days": 1,
+                },
+            )
+            response.raise_for_status()
+            result = _parse_current(response.json())
+            result["city"] = default_city
+            return result
+    except httpx.HTTPError as exc:
+        log.warning("погода для /satellite недоступна: %s", exc)
+        return None
 
 
 def _day_line(daily: dict, i: int) -> str:

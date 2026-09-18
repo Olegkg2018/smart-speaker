@@ -16,13 +16,23 @@ JDK, и всё это ради того, чтобы гнать звук в со�
 
 from __future__ import annotations
 
+import time
+
 from fastapi import APIRouter
 from fastapi.responses import HTMLResponse
 
 from app import webstyle
 from app.config import settings
+from app.tools.weather import current_conditions
 
 router = APIRouter()
+
+# Кэш на весь процесс, не на сессию: у киоска локация всегда одна и та же
+# (default_city из настроек), несколько устройств могут спрашивать погоду
+# одновременно — незачем дёргать Open-Meteo на каждое обновление вкладки.
+_weather_cache: dict | None = None
+_weather_cache_at: float = 0.0
+_WEATHER_TTL_S = 600  # 10 минут — для виджета этого достаточно
 
 _PAGE = """<!doctype html>
 <html lang="ru">
@@ -32,7 +42,14 @@ _PAGE = """<!doctype html>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>📡</text></svg>">
 <style>
 __BASE_CSS__
+  .kiosk { text-align: center; }
+  #clock { font-size: 3.6rem; font-weight: 700; line-height: 1; letter-spacing: .02em; }
+  #date { color: var(--muted); margin: 6px 0 14px; text-transform: capitalize; }
+  #weather { font-size: 1.3rem; }
+  #weather .icon { font-size: 1.6rem; vertical-align: -3px; margin-right: 6px; }
+  #weather .desc { color: var(--muted); font-size: 1rem; }
   .panel { text-align: center; }
+  .panel[hidden] { display: none; }
   #state { font-size: 1.9rem; font-weight: 700; margin: 6px 0 4px; min-height: 2.3rem; }
   #text { color: var(--muted); min-height: 2.6rem; font-size: .95rem; }
   #meter { height: 12px; background: var(--surface2); border-radius: 7px;
@@ -67,8 +84,14 @@ __NAV__
     <p>Ещё один микрофон для той же колонки — разговор, память и ответ общие.</p>
   </div>
 
+  <div class="card kiosk">
+    <div id="clock">--:--</div>
+    <div id="date"></div>
+    <div id="weather"></div>
+  </div>
+
   <div class="card panel">
-    <div id="state">—</div>
+    <div id="state" hidden>—</div>
     <div id="text"></div>
     <div id="meter"><div id="bar"></div></div>
     <button id="go">Слушать</button>
@@ -92,7 +115,8 @@ __NAV__
       включая Chrome, работает на системном WebKit, а не Chromium. Нужен
       настоящий HTTPS: открой <code id="hintIOSUrl"></code> вместо этой
       страницы (сертификат самоподписанный — один раз подтверди «всё равно
-      открыть»).</span>
+      открыть»). Для киоска, который стоит на подставке постоянно, этот же
+      HTTPS-адрес нужен и затем, чтобы экран надёжно не гас (Wake Lock).</span>
     </div>
   </div>
 
@@ -107,6 +131,44 @@ const STATES = {idle: 'Готова', listening: 'Слушаю', thinking: 'Ду
 let ws, ctx, node, stream, running = false;
 
 function show(err) { $('err').textContent = err || ''; }
+
+// --- киоск: часы и погода, не зависят от сокета/микрофона ---
+
+function updateClock() {
+  const now = new Date();
+  $('clock').textContent = now.toLocaleTimeString('ru-RU', {hour: '2-digit', minute: '2-digit'});
+  $('date').textContent = now.toLocaleDateString('ru-RU', {
+    weekday: 'long', day: 'numeric', month: 'long',
+  });
+}
+updateClock();
+setInterval(updateClock, 1000);
+
+async function updateWeather() {
+  try {
+    const resp = await fetch('/api/weather');
+    const w = await resp.json();
+    if (w.temp === undefined) return;  // сервису Open-Meteo сейчас нечего ответить
+    $('weather').innerHTML =
+      `<span class="icon">${w.icon}</span>${w.temp}°C ` +
+      `<span class="desc">${w.description}, ${w.city}</span>`;
+  } catch { /* нет сети — оставляем то, что уже показано */ }
+}
+updateWeather();
+setInterval(updateWeather, 10 * 60 * 1000);
+
+// Экран не должен гаснуть — это киоск на подставке, а не разовый визит.
+// Best-effort: без HTTPS (или на браузере без поддержки) просто не сработает,
+// остальной странице это не мешает. Снимается браузером при уходе вкладки
+// в фон и не восстанавливается сам — переприобретаем по возврату.
+async function requestWakeLock() {
+  if (!('wakeLock' in navigator)) return;
+  try { await navigator.wakeLock.request('screen'); } catch { /* не критично */ }
+}
+requestWakeLock();
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') requestWakeLock();
+});
 
 async function start() {
   $('go').disabled = true;
@@ -152,6 +214,9 @@ async function start() {
     let m; try { m = JSON.parse(ev.data); } catch { return; }
     if (m.t === 'state') {
       $('state').textContent = STATES[m.value] || m.value;
+      // В покое киоск — это просто часы с погодой; статус занимает место
+      // на виду только пока что-то реально происходит.
+      $('state').hidden = (m.value === 'idle');
       if (m.value === 'idle' || m.value === 'listening') $('text').textContent = '';
       // Слушаю — кнопка красная и подписана «Стоп»: повторный тап обрывает
       // запись раньше тишины (тот же смысл, что у тапа физической кнопки).
@@ -213,11 +278,8 @@ async function start() {
   mute.gain.value = 0;
   node.connect(mute);
   mute.connect(ctx.destination);
-
-  // Экран не должен гаснуть: иначе браузер усыпит вкладку и микрофон.
-  if ('wakeLock' in navigator) {
-    navigator.wakeLock.request('screen').catch(() => {});
-  }
+  // Wake Lock уже запрошен при загрузке страницы (см. requestWakeLock
+  // выше) — киоск не должен гаснуть и до первого нажатия «Слушать».
 }
 
 function stop(msg) {
@@ -232,6 +294,7 @@ function stop(msg) {
   $('talk').classList.remove('active');
   $('volBox').hidden = true;
   $('state').textContent = '—';
+  $('state').hidden = true;
   $('bar').style.width = '0';
   if (msg) show(msg);
 }
@@ -284,3 +347,19 @@ async def satellite() -> str:
         .replace("__BASE_CSS__", webstyle.BASE_CSS)
         .replace("__NAV__", webstyle.nav("satellite"))
     )
+
+
+@router.get("/api/weather")
+async def weather() -> dict:
+    """Погода для виджета киоска на /satellite. Молчаливо отдаёт то, что
+    получилось (в том числе устаревший кэш при сбое Open-Meteo) — виджету
+    важнее не мигать пустотой, чем быть идеально свежим."""
+    global _weather_cache, _weather_cache_at
+    if _weather_cache is None or time.monotonic() - _weather_cache_at > _WEATHER_TTL_S:
+        fresh = await current_conditions(
+            settings.default_city, settings.default_latitude, settings.default_longitude
+        )
+        if fresh is not None:
+            _weather_cache = fresh
+            _weather_cache_at = time.monotonic()
+    return _weather_cache or {}

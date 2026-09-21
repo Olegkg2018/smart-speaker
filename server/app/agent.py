@@ -17,7 +17,7 @@ from app.config import Settings
 from app import memory_summary
 from app.memory import Turn
 from app.tools.context import ToolContext
-from app.tools.registry import TOOL_SCHEMAS, dispatch
+from app.tools.registry import dispatch, tool_schemas
 from app.tts import SentenceBuffer
 
 log = logging.getLogger(__name__)
@@ -149,7 +149,7 @@ class Agent:
                     "cache_control": {"type": "ephemeral"},
                 }
             ],
-            tools=TOOL_SCHEMAS,
+            tools=tool_schemas(self._settings),
             messages=self._history,
         ) as stream:
             async for event in stream:

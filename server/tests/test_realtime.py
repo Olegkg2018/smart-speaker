@@ -669,3 +669,81 @@ async def test_start_revive_does_not_spawn_a_second_loop(monkeypatch):
 
 async def _noop_speak(text):
     pass
+
+
+# ---------- принудительный вызов инструмента на продолжении разговора ----------
+
+
+class _ResponseRecorder:
+    def __init__(self):
+        self.created: list = []
+
+    async def create(self, **kwargs):
+        self.created.append(kwargs)
+
+
+class _CommitBuffer:
+    async def commit(self):
+        pass
+
+
+class _FullCallbacks(_Callbacks):
+    async def drop_audio(self):
+        pass
+
+    async def set_state(self, state):
+        pass
+
+
+def _voice_ready_to_end(expert_model="gpt-5.4-mini", force=True):
+    voice = _idle_voice()
+    voice._mic_batch = bytearray()
+    voice._transcript = ""
+    voice._pending_user = None
+    voice._user_ready = asyncio.Event()
+    voice._flush_mic = _noop_flush
+    voice._cb = _FullCallbacks()
+    voice._settings = types.SimpleNamespace(
+        expert_model=expert_model, expert_force_on_followup=force
+    )
+    voice._conn = types.SimpleNamespace(
+        input_audio_buffer=_CommitBuffer(), response=_ResponseRecorder()
+    )
+    return voice
+
+
+async def _noop_flush():
+    pass
+
+
+async def test_followup_utterance_forces_a_tool_call():
+    voice = _voice_ready_to_end()
+    await voice.begin_utterance(followup=True)
+    await voice.end_utterance()
+
+    assert voice._conn.response.created == [{"response": {"tool_choice": "required"}}]
+
+
+async def test_regular_utterance_does_not_force_anything():
+    voice = _voice_ready_to_end()
+    await voice.begin_utterance(followup=False)
+    await voice.end_utterance()
+
+    assert voice._conn.response.created == [{}]
+
+
+async def test_forcing_needs_an_expert_and_can_be_switched_off():
+    for kwargs in ({"expert_model": ""}, {"force": False}):
+        voice = _voice_ready_to_end(**kwargs)
+        await voice.begin_utterance(followup=True)
+        await voice.end_utterance()
+        assert voice._conn.response.created == [{}], kwargs
+
+
+async def test_followup_flag_does_not_leak_into_the_next_utterance():
+    voice = _voice_ready_to_end()
+    await voice.begin_utterance(followup=True)
+    await voice.begin_utterance(followup=False)
+    await voice.end_utterance()
+
+    assert voice._conn.response.created == [{}]

@@ -31,7 +31,7 @@ from app.tools import notes as notes_tool
 from app.pricing import CostMeter
 from app.protocol import State
 from app.tools.context import ToolContext
-from app.tools.registry import TOOL_SCHEMAS, dispatch
+from app.tools.registry import dispatch, tool_schemas
 from app.voice import VoiceCallbacks
 
 log = logging.getLogger(__name__)
@@ -151,15 +151,16 @@ def _build_instructions(history: list[Turn], notes: str = "", summary=None) -> s
     )
 
 
-_TOOLS = [
-    {
-        "type": "function",
-        "name": t["name"],
-        "description": t["description"],
-        "parameters": t["input_schema"],
-    }
-    for t in TOOL_SCHEMAS
-]
+def _realtime_tools(settings) -> list[dict]:
+    return [
+        {
+            "type": "function",
+            "name": t["name"],
+            "description": t["description"],
+            "parameters": t["input_schema"],
+        }
+        for t in tool_schemas(settings)
+    ]
 
 
 class RealtimeVoice:
@@ -167,6 +168,8 @@ class RealtimeVoice:
     # __new__ без __init__, а эти поля читаются на путях отказа.
     _closed = False
     _revive_task: asyncio.Task | None = None
+    # Текущая реплика — продолжение разговора (см. end_utterance).
+    _followup_turn = False
 
     def __init__(self, settings: Settings, ctx: ToolContext, cb: VoiceCallbacks):
         self._settings = settings
@@ -262,7 +265,7 @@ class RealtimeVoice:
                                 "voice": self._settings.openai_voice,
                             },
                         },
-                        "tools": _TOOLS,
+                        "tools": _realtime_tools(self._settings),
                         # Без этого контекст растёт неограниченно, а Realtime считает
                         # входные токены за весь накопленный разговор на каждый ответ —
                         # десятая реплика стоит как десять первых.
@@ -347,7 +350,8 @@ class RealtimeVoice:
         if assistant:
             await self._cb.save_turn("assistant", assistant)
 
-    async def begin_utterance(self) -> None:
+    async def begin_utterance(self, followup: bool = False) -> None:
+        self._followup_turn = followup
         await self.barge_in()
         self._mic_batch.clear()
         self._transcript = ""
@@ -400,7 +404,19 @@ class RealtimeVoice:
         await self._flush_mic()
         await self._cb.set_state(State.THINKING)
         await self._conn.input_audio_buffer.commit()
-        await self._conn.response.create()
+        if (
+            self._followup_turn
+            and getattr(self._settings, "expert_model", "")
+            and getattr(self._settings, "expert_force_on_followup", False)
+        ):
+            # Продолжение разговора: mini обязана вызвать какой-нибудь
+            # инструмент — конкретный, если он подходит, иначе ask_expert.
+            # Именно «required», а не имя ask_expert: иначе «поставь таймер»
+            # на продолжении ушло бы к эксперту, который таймер не поставит.
+            log.info("продолжение разговора — вызов инструмента обязателен")
+            await self._conn.response.create(response={"tool_choice": "required"})
+        else:
+            await self._conn.response.create()
 
     async def barge_in(self) -> None:
         if self._conn is not None:

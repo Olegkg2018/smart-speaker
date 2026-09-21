@@ -11,6 +11,7 @@ from typing import Any
 
 from app.tools import (
     alarms,
+    expert,
     homeassistant,
     lists,
     music,
@@ -287,6 +288,46 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "input_schema": {"type": "object", "properties": {}, "required": []},
     },
     {
+        "name": "ask_expert",
+        "description": (
+            "Позвать более умного помощника, когда вопрос требует рассуждения, "
+            "а не справки: объяснить, почему или как что-то устроено, дать "
+            "совет, сравнить варианты, помочь принять решение, разобрать "
+            "задачу, ответить на сложный или неоднозначный вопрос. А также "
+            "когда человек продолжает разговор и для ответа надо понять, о чём "
+            "речь шла раньше.\n"
+            "НЕ вызывай для того, у чего есть свой инструмент: погоду "
+            "спрашивай через get_weather, новости через get_news, факты из "
+            "интернета через web_search, музыку включай через play_music, "
+            "таймеры и будильники — через их инструменты. Простую болтовню и "
+            "приветствия ведёшь сам.\n"
+            "Ответ пришлёт помощник — озвучь его почти дословно, ничего не "
+            "добавляя и не переиначивая от себя."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "question": {
+                    "type": "string",
+                    "description": (
+                        "Вопрос человека обычными словами, на его языке, "
+                        "самодостаточный: так, чтобы его можно было понять без "
+                        "звука. Если это продолжение разговора («а завтра?», "
+                        "«почему?») — допиши, о чём речь."
+                    ),
+                },
+                "context": {
+                    "type": "string",
+                    "description": (
+                        "Необязательно: что ещё важно знать для ответа, чего "
+                        "нет в самом вопросе."
+                    ),
+                },
+            },
+            "required": ["question"],
+        },
+    },
+    {
         "name": "web_search",
         "description": (
             "Найти в интернете то, чего не знаешь и что не покрыто другими "
@@ -453,6 +494,17 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
 ]
 
 
+def tool_schemas(settings) -> list[dict[str, Any]]:
+    """Инструменты, которые показываются модели с этими настройками.
+
+    ask_expert без заданной EXPERT_MODEL вызывать нечем — модели о нём знать
+    не нужно: иначе она будет звать инструмент, который отвечает «не настроен».
+    """
+    if getattr(settings, "expert_model", ""):
+        return TOOL_SCHEMAS
+    return [t for t in TOOL_SCHEMAS if t["name"] != "ask_expert"]
+
+
 async def dispatch(ctx: ToolContext, name: str, args: dict[str, Any]) -> str:
     """Выполняет инструмент. Возвращает короткую строку для модели.
 
@@ -497,6 +549,19 @@ async def dispatch(ctx: ToolContext, name: str, args: dict[str, Any]) -> str:
                 return await alarms.list_alarms(ctx.settings.alarms_dir)
             case "cancel_alarms":
                 return await alarms.cancel_alarms(ctx.settings.alarms_dir)
+            case "ask_expert":
+                turns, summary = ctx.recent_turns()
+                return await expert.ask_expert(
+                    ctx.settings.openai_api_key,
+                    ctx.settings.expert_model,
+                    args["question"],
+                    args.get("context", ""),
+                    turns,
+                    summary,
+                    context_turns=ctx.settings.expert_context_turns,
+                    reasoning_effort=ctx.settings.expert_reasoning_effort,
+                    timeout_s=ctx.settings.expert_timeout_s,
+                )
             case "web_search":
                 return await websearch.web_search(
                     ctx.settings.openai_api_key,

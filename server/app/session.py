@@ -106,7 +106,12 @@ class Session:
             listen_duck_level=settings.listen_duck_level,
             volume=settings.default_volume,
         )
-        self._ctx = ToolContext(settings=settings, mixer=self._mixer, speak=self._announce)
+        self._ctx = ToolContext(
+            settings=settings,
+            mixer=self._mixer,
+            speak=self._announce,
+            recent_turns=self._recent_turns,
+        )
         self._mixer.on_track_finished = self._play_next_in_queue
         callbacks = VoiceCallbacks(
             set_state=self._set_state,
@@ -425,6 +430,13 @@ class Session:
         # работает ли разговор — разбудить нужно даже при сбое облака.
         self._restore_alarms()
 
+    def _recent_turns(self) -> tuple[list, object]:
+        """Реплики и сводка для ask_expert: память создаётся позже сессии,
+        поэтому читаем её в момент вызова, а не при сборке ToolContext."""
+        if self._memory is None:
+            return [], None
+        return self._memory.turns, self._memory.summary
+
     async def _set_volume(self, level: float) -> None:
         self._mixer.volume = max(0.0, min(1.0, level))
         await self._send_json_to(self._peers.all(), volume_msg(self._mixer.volume))
@@ -561,7 +573,7 @@ class Session:
         chosen = self._peers.choose_active()
         if chosen is not None and len(self._peers.all()) > 1:
             await self._show_source(chosen)
-        await self._voice.begin_utterance()
+        await self._voice.begin_utterance(followup=False)
         self._mic_bytes = 0
         self._vad.reset()
         self._listen_started = time.monotonic()
@@ -629,7 +641,7 @@ class Session:
 
     async def _start_followup_window(self, peer: Peer) -> None:
         self._peers.keep_active(peer)
-        await self._voice.begin_utterance()
+        await self._voice.begin_utterance(followup=True)
         self._mic_bytes = 0
         self._vad.reset()
         self._speaker_level.reset()

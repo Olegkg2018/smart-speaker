@@ -26,6 +26,7 @@ class _FakeVoice:
         self.barge_in_called = False
         self.end_utterance_called = False
         self.begin_utterance_called = False
+        self.begin_followup = None
         self.fed: list[bytes] = []
 
     async def barge_in(self):
@@ -34,8 +35,9 @@ class _FakeVoice:
     async def end_utterance(self):
         self.end_utterance_called = True
 
-    async def begin_utterance(self):
+    async def begin_utterance(self, followup=False):
         self.begin_utterance_called = True
+        self.begin_followup = followup
 
     async def feed(self, pcm):
         self.fed.append(pcm)
@@ -352,6 +354,7 @@ async def test_start_followup_window_opens_mic_without_new_wake_word():
     assert session._vad.reset_called
     assert session._speaker_level.reset_called
     assert session._voice.begin_utterance_called
+    assert session._voice.begin_followup is True, "продолжение обязано сказать об этом бэкенду"
     assert session._peers.active is peer
     assert set_state_calls == [State.LISTENING]
     assert session._followup_watchdog is not None
@@ -543,3 +546,27 @@ async def test_voice_start_retry_stops_when_session_is_cancelled(monkeypatch):
 
     assert task.cancelled()
     assert session._voice_ready is False
+
+
+async def test_regular_recording_tells_the_backend_it_is_not_a_followup():
+    """Флаг нужен Realtime, чтобы принуждать инструмент только на
+    продолжениях; обычная реплика (слово/кнопка) его не выставляет."""
+    session = Session.__new__(Session)
+    session._voice_ready = True
+    session._voice_failed = False
+    session._peers = types.SimpleNamespace(choose_active=lambda: None, all=lambda: [])
+    session._voice = _FakeVoice()
+    session._vad = _FakeVAD(heard_speech=False)
+    session._mixer = types.SimpleNamespace(set_listening=lambda v: None)
+    session._recording = False
+    states: list = []
+
+    async def fake_set_state(state):
+        states.append(state)
+
+    session._set_state = fake_set_state
+
+    await session._start_recording()
+
+    assert session._voice.begin_followup is False
+    assert states == [State.LISTENING]

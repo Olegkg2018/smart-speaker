@@ -41,7 +41,7 @@ class VoiceCallbacks:
 
 class VoiceBackend(Protocol):
     async def start(self, history: list[Turn], summary: str = "") -> None: ...
-    async def begin_utterance(self) -> None: ...
+    async def begin_utterance(self, followup: bool = False) -> None: ...
     async def feed(self, pcm: bytes) -> None: ...
     async def end_utterance(self) -> None: ...
     async def barge_in(self) -> None: ...
@@ -69,7 +69,9 @@ class ClaudeVoice:
     async def start(self, history: list[Turn], summary: str = "") -> None:
         self._agent.seed_history(history, summary)
 
-    async def begin_utterance(self) -> None:
+    async def begin_utterance(self, followup: bool = False) -> None:
+        # followup нужен только Realtime (принудительный вызов инструмента);
+        # здесь модель одна и выбирать нечего.
         await self.barge_in()
         self._buffer.clear()
 

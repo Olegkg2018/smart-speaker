@@ -82,6 +82,13 @@ _RECONNECT_BACKOFF_S = (3.0, 10.0, 30.0)
 # пока соединение не поднималось вовсе.
 _RECONNECT_ANNOUNCE_MIN_GAP_S = 30.0
 
+# Когда все _RECONNECT_ATTEMPTS провалились (сеть или OpenAI лежат дольше
+# минуты), сдаваться насовсем нельзя: «штатного разрыва» больше не будет,
+# плановое обновление при _conn=None молча выходит, и голос оставался мёртвым
+# до ручного вмешательства — колонка при этом показывает «Готова». Дальше
+# пробуем раз в столько секунд, пока не получится или сессию не закроют.
+_REVIVE_INTERVAL_S = 60.0
+
 def _decode_and_resample(delta: str, src_rate: int, dst_rate: int) -> bytes:
     return resample_pcm16(base64.b64decode(delta), src_rate, dst_rate)
 
@@ -156,6 +163,11 @@ _TOOLS = [
 
 
 class RealtimeVoice:
+    # Класс-уровневые значения по умолчанию: тесты собирают голый объект через
+    # __new__ без __init__, а эти поля читаются на путях отказа.
+    _closed = False
+    _revive_task: asyncio.Task | None = None
+
     def __init__(self, settings: Settings, ctx: ToolContext, cb: VoiceCallbacks):
         self._settings = settings
         self._ctx = ctx
@@ -411,6 +423,9 @@ class RealtimeVoice:
         # Не переподключаться после закрытия сессии — иначе разговор с уже
         # отключившейся колонкой продолжит держать соединение с OpenAI.
         self._reconnecting = True
+        self._closed = True
+        if self._revive_task is not None:
+            self._revive_task.cancel()
         if self._refresh_task is not None:
             self._refresh_task.cancel()
         if self._recv_task is not None:
@@ -503,6 +518,24 @@ class RealtimeVoice:
         else:
             with contextlib.suppress(Exception):
                 await self._ctx.speak("Голосовой сервис пока недоступен.")
+            self._start_revive()
+
+    def _start_revive(self) -> None:
+        if self._closed:
+            return
+        if self._revive_task is not None and not self._revive_task.done():
+            return
+        self._revive_task = asyncio.create_task(self._revive_loop())
+
+    async def _revive_loop(self) -> None:
+        """Продолжает попытки после того, как _reconnect_with_retry сдался."""
+        while not self._closed:
+            await asyncio.sleep(_REVIVE_INTERVAL_S)
+            if self._closed or self._conn is not None:
+                return
+            if await self._reconnect_with_retry():
+                log.info("соединение с OpenAI Realtime восстановлено после долгого отказа")
+                return
 
     async def _proactive_refresh(self, delay_s: float | None = None) -> None:
         """Обновляет сессию заранее, не дожидаясь принудительного разрыва.
@@ -560,6 +593,7 @@ class RealtimeVoice:
             )
             with contextlib.suppress(Exception):
                 await self._ctx.speak("Голосовой сервис пока недоступен.")
+            self._start_revive()
         self._reconnecting = False
 
     async def _on_event(self, event) -> None:

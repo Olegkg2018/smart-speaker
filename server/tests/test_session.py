@@ -468,3 +468,78 @@ async def test_followup_gate_is_noop_without_raw_level():
 
     assert session._in_followup is False
     assert session._voice.fed
+
+
+# ---------- первый запуск голосового бэкенда ----------
+
+
+class _FlakyStartVoice:
+    """start() падает заданное число раз, потом получается."""
+
+    def __init__(self, failures: int):
+        self.failures = failures
+        self.calls = 0
+
+    async def start(self, turns, summary):
+        self.calls += 1
+        if self.calls <= self.failures:
+            raise TimeoutError("Realtime connect timed out")
+
+
+def _voice_start_session(failures: int):
+    session = Session.__new__(Session)
+    session._memory = None
+    session._voice = _FlakyStartVoice(failures)
+    session._voice_failed = False
+    session._voice_ready = False
+    announced: list[str] = []
+
+    async def fake_announce(text):
+        announced.append(text)
+
+    session._announce = fake_announce
+    return session, announced
+
+
+async def test_voice_start_is_retried_until_it_succeeds(monkeypatch):
+    """После перезагрузки платы сеть поднимается не сразу: первая попытка
+    запуска Realtime падала, и сессия навсегда оставалась «сервис
+    недоступен» (~21 час колонка отвечала только этим). Теперь — повторы."""
+    monkeypatch.setattr(session_mod, "_VOICE_RETRY_DELAYS_S", (0.0,))
+    session, announced = _voice_start_session(failures=3)
+
+    await session._start_voice()
+
+    assert session._voice.calls == 4
+    assert session._voice_ready is True
+    assert session._voice_failed is False, "флаг отказа обязан сняться после успеха"
+    assert len(announced) == 1, "об отказе говорим один раз, а не на каждой попытке"
+
+
+async def test_voice_start_success_first_time_stays_quiet(monkeypatch):
+    monkeypatch.setattr(session_mod, "_VOICE_RETRY_DELAYS_S", (0.0,))
+    session, announced = _voice_start_session(failures=0)
+
+    await session._start_voice()
+
+    assert session._voice_ready is True
+    assert session._voice_failed is False
+    assert announced == []
+
+
+async def test_voice_start_retry_stops_when_session_is_cancelled(monkeypatch):
+    """Закрытие сессии (_shutdown отменяет задачу) не должно оставлять
+    вечный цикл попыток в фоне."""
+    monkeypatch.setattr(session_mod, "_VOICE_RETRY_DELAYS_S", (0.01,))
+    session, _ = _voice_start_session(failures=10**6)
+
+    task = asyncio.create_task(session._start_voice())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    assert task.cancelled()
+    assert session._voice_ready is False

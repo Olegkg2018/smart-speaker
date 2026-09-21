@@ -594,3 +594,78 @@ async def test_run_tool_drops_result_if_connection_changed_mid_dispatch(monkeypa
 
     assert old_conn.created_items == [] and old_conn.responses_created == 0
     assert new_conn.created_items == [] and new_conn.responses_created == 0
+
+
+# ---------- реанимация после исчерпания попыток ----------
+
+
+async def test_reconnect_that_gave_up_keeps_trying_in_the_background(monkeypatch):
+    """Раньше после трёх неудач _reconnect сдавался насовсем: _conn оставался
+    None, плановое обновление при мёртвом соединении молча выходило, и голос
+    не возвращался до ручного вмешательства (колонка при этом «Готова»)."""
+    monkeypatch.setattr(realtime_mod, "_RECONNECT_ATTEMPTS", 1)
+    monkeypatch.setattr(realtime_mod, "_RECONNECT_BACKOFF_S", (0.0,))
+    monkeypatch.setattr(realtime_mod, "_REVIVE_INTERVAL_S", 0.01)
+    voice = _idle_voice()
+    voice._conn = None
+    voice._ctx = types.SimpleNamespace(speak=_noop_speak)
+    attempts = []
+
+    async def recovers_on_fourth_try(history, summary=""):
+        attempts.append(1)
+        if len(attempts) < 4:
+            raise RuntimeError("сети нет")
+        voice._conn = object()
+
+    voice.start = recovers_on_fourth_try
+
+    await voice._reconnect()
+    assert voice._revive_task is not None, "после сдачи должен стартовать реаниматор"
+    await asyncio.wait_for(voice._revive_task, timeout=2)
+
+    assert len(attempts) == 4
+    assert voice._conn is not None
+
+
+async def test_revive_loop_stops_when_the_session_is_closed(monkeypatch):
+    monkeypatch.setattr(realtime_mod, "_RECONNECT_ATTEMPTS", 1)
+    monkeypatch.setattr(realtime_mod, "_RECONNECT_BACKOFF_S", (0.0,))
+    monkeypatch.setattr(realtime_mod, "_REVIVE_INTERVAL_S", 0.01)
+    voice = _idle_voice()
+    voice._conn = None
+    voice._ctx = types.SimpleNamespace(speak=_noop_speak)
+    attempts = []
+
+    async def never_works(history, summary=""):
+        attempts.append(1)
+        raise RuntimeError("сети нет")
+
+    voice.start = never_works
+
+    await voice._reconnect()
+    await asyncio.sleep(0.05)
+    voice._closed = True  # так close() помечает конец сессии
+    seen = len(attempts)
+    await asyncio.wait_for(voice._revive_task, timeout=2)
+    await asyncio.sleep(0.05)
+
+    assert len(attempts) <= seen + 1, "после закрытия сессии попытки прекращаются"
+
+
+async def test_start_revive_does_not_spawn_a_second_loop(monkeypatch):
+    monkeypatch.setattr(realtime_mod, "_REVIVE_INTERVAL_S", 10.0)
+    voice = _idle_voice()
+    voice._conn = None
+
+    voice._start_revive()
+    first = voice._revive_task
+    voice._start_revive()
+
+    assert voice._revive_task is first
+    first.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await first
+
+
+async def _noop_speak(text):
+    pass

@@ -75,6 +75,10 @@ _STATE_WATCHDOG_S = 45.0
 # machine (см. CLAUDE.md).
 _FOLLOWUP_WATCHDOG_MARGIN_S = 2.0
 
+# Паузы между попытками первого запуска голосового бэкенда (_start_voice);
+# дальше — каждые 60 с, пока не получится или сессия не закроется.
+_VOICE_RETRY_DELAYS_S = (5.0, 15.0, 30.0, 60.0)
+
 
 class Session:
     def __init__(
@@ -145,6 +149,7 @@ class Session:
         self._in_followup = False
         self._last_active_peer: Peer | None = None
         self._followup_watchdog: asyncio.Task | None = None
+        self._voice_task: asyncio.Task | None = None
 
 
     # ---------- рассылка устройствам ----------
@@ -219,6 +224,9 @@ class Session:
         await self._shutdown()
 
     async def _shutdown(self) -> None:
+        if self._voice_task is not None:
+            self._voice_task.cancel()
+            self._voice_task = None
         if self._notifier is not None:
             # Вопрос без ответа тоже стоит переслать, иначе он пропадёт.
             with contextlib.suppress(Exception):
@@ -411,7 +419,7 @@ class Session:
         # мы не читали бы данные от колонки: у неё переполняется буфер
         # отправки, она рвёт связь и подключается заново — по кругу, так что
         # разговор не начинается вовсе. Поэтому поднимаем бэкенд в фоне.
-        asyncio.create_task(self._start_voice())
+        self._voice_task = asyncio.create_task(self._start_voice())
 
         # Будильники поднимаем в любом случае: они не зависят от того,
         # работает ли разговор — разбудить нужно даже при сбое облака.
@@ -423,20 +431,43 @@ class Session:
         await self._show(f"Громкость {round(self._mixer.volume * 100)}%")
 
     async def _start_voice(self) -> None:
-        """Поднимает голосовой бэкенд, не задерживая приём от колонки."""
-        try:
-            await self._voice.start(
-                self._memory.turns if self._memory else [],
-                self._memory.summary if self._memory else "",
-            )
+        """Поднимает голосовой бэкенд, не задерживая приём от колонки.
+
+        Повторяет попытки, пока не получится. Раньше первая же неудача
+        помечала сессию «сервис недоступен» навсегда: после перезагрузки
+        платы сеть/DNS поднимаются не сразу, Realtime не отвечал 15 с — и
+        колонка с сателлитами ~21 час показывала «Готова», отвечая на любую
+        реплику «Голосовой сервис недоступен», пока кто-то не переподключил
+        колонку и не пересоздал сессию.
+        """
+        attempt = 0
+        while True:
+            try:
+                await self._voice.start(
+                    self._memory.turns if self._memory else [],
+                    self._memory.summary if self._memory else "",
+                )
+            except Exception:
+                # Ключ неверный, нет сети, кончилась квота. Ронять сессию
+                # нельзя: колонка уйдёт в бесконечный цикл переподключения и
+                # даже не сможет сказать, что случилось.
+                first = not self._voice_failed
+                self._voice_failed = True
+                delay = _VOICE_RETRY_DELAYS_S[min(attempt, len(_VOICE_RETRY_DELAYS_S) - 1)]
+                attempt += 1
+                if first:
+                    log.exception("голосовой бэкенд не запустился — буду пробовать снова")
+                    await self._announce("Не могу подключиться к голосовому сервису.")
+                else:
+                    log.warning("голосовой бэкенд всё ещё не поднялся (попытка %d), жду %.0f с",
+                                attempt, delay)
+                await asyncio.sleep(delay)
+                continue
+            self._voice_failed = False
             self._voice_ready = True
-        except Exception:
-            # Ключ неверный, нет сети, кончилась квота. Ронять сессию нельзя:
-            # колонка уйдёт в бесконечный цикл переподключения и даже не
-            # сможет сказать, что случилось.
-            log.exception("голосовой бэкенд не запустился")
-            self._voice_failed = True
-            await self._announce("Не могу подключиться к голосовому сервису.")
+            if attempt:
+                log.info("голосовой бэкенд поднялся после %d неудачных попыток", attempt)
+            return
 
     def _restore_alarms(self) -> None:
         """Поднимает будильники с диска — их ставили в прошлой сессии.

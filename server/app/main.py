@@ -239,7 +239,17 @@ async def stream(ws: WebSocket) -> None:
     room = str(hello.get("room", "home"))
     async with _rooms_lock:
         session = _rooms.get(room)
-        if session is None:
+        # session.is_empty, а не только session is None: последний пир
+        # снимается с сессии (и она пустеет) синхронно в её собственном
+        # serve()/finally, а вот _close()/_shutdown() и удаление из _rooms
+        # (ниже, в finally этой функции) — асинхронные и небыстрые (гасят
+        # голосовой бэкенд, микшер, сторожа). Живой случай: колонку
+        # обесточили во время игравшей музыки, старая сессия ещё дотирает
+        # закрытие, а колонка тут же переподключается — без этой проверки
+        # она садится в ЕЩЁ НЕ удалённую из _rooms старую сессию и
+        # наследует её состояние (светодиод фиолетовый, «играет музыка»,
+        # хотя играть уже нечему), а не получает чистую IDLE.
+        if session is None or session.is_empty:
             session = Session(settings, stt, tts, screen if settings.screen_enabled else None)
             _rooms[room] = session
 

@@ -6,6 +6,7 @@
 #include "esp_agc.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 #include "freertos/task.h"
 
 static const char *TAG = "audio_in";
@@ -38,6 +39,16 @@ static void *s_agc;
 static happy_raw_level_cb_t s_on_level;
 static uint16_t s_smoothed_level;
 static int s_level_divider;
+// s_on_level в итоге шлёт JSON по WebSocket (esp_websocket_client_send_text,
+// таймаут 200 мс) — тот же класс ошибки, что уже был с Opus-кодеком до
+// переноса в отдельную задачу (см. CLAUDE.md, «Opus вместо сырого PCM»):
+// сетевой вызов прямо из mic_task, самой приоритетной аудио-задачи (6),
+// периодически подвешивал её, DMA-буфер (всего 4 дескриптора) переполнялся,
+// и это било и по рывкам речи, и по чувствительности активационного слова
+// (обрывки фразы — хуже отношение сигнал/шум для WakeNet). Очередь длины 1
+// с overwrite — mic_task никогда не блокируется, а отправкой занимается
+// отдельная низкоприоритетная задача ниже.
+static QueueHandle_t s_level_queue;
 // Кадр микрофона — 20 мс; отдаём наружу раз в ~100 мс, а не на каждый
 // кадр — серверу для сравнения громкости этого достаточно, а JSON на
 // каждые 20 мс просто грузил бы канал зря.
@@ -101,12 +112,14 @@ static void mic_task(void *arg)
         // нужно серверу: AGC специально стирает разницу в громкости
         // источников, а окну продолжения разговора эта разница и нужна
         // (см. app/audio/speaker_level.py на сервере).
-        if (s_on_level != NULL && samples > 0) {
+        if (s_level_queue != NULL && samples > 0) {
             uint16_t level = (uint16_t)(abs_sum / samples);
             s_smoothed_level = (uint16_t)((s_smoothed_level * 3 + level) / 4);
             if (++s_level_divider >= RAW_LEVEL_REPORT_EVERY) {
                 s_level_divider = 0;
-                s_on_level(s_smoothed_level);
+                // Не блокирует никогда: очередь длины 1, старое значение
+                // просто заменяется, если задача-отправитель ещё не забрала.
+                xQueueOverwrite(s_level_queue, &s_smoothed_level);
             }
         }
 
@@ -129,6 +142,18 @@ static void mic_task(void *arg)
         // Эхоподавитель вычитает то, что играет сама колонка. Кадры у него
         // своей длины, поэтому отправкой занимается колбэк, а не этот цикл.
         happy_frontend_process(out, samples);
+    }
+}
+
+static void level_report_task(void *arg)
+{
+    uint16_t level;
+    while (true) {
+        // Блокируется тут, а не в mic_task — этой задаче можно ждать сколько
+        // угодно, включая сам сетевой вызов внутри s_on_level.
+        if (xQueueReceive(s_level_queue, &level, portMAX_DELAY) == pdTRUE && s_on_level != NULL) {
+            s_on_level(level);
+        }
     }
 }
 
@@ -158,6 +183,17 @@ esp_err_t happy_audio_in_start(happy_raw_level_cb_t on_level)
         set_agc_config(s_agc, /*gain_dB=*/0, /*limiter_enable=*/1, /*target_level_dbfs=*/-3);
     } else {
         ESP_LOGW(TAG, "AGC не поднялся — работаю с фиксированным усилением");
+    }
+
+    if (on_level != NULL) {
+        s_level_queue = xQueueCreate(1, sizeof(uint16_t));
+        // Приоритет 3 — ниже mic_task(6)/afe_fetch(5)/opus_codec(5), чтобы
+        // сетевая отправка не отбирала время у самого звука, но выше
+        // watchdog(2), это не фон, а разговор в реальном времени.
+        if (s_level_queue == NULL ||
+            xTaskCreate(level_report_task, "mic_level", 3072, NULL, 3, NULL) != pdPASS) {
+            ESP_LOGW(TAG, "не поднял отправку mic_level — окно продолжения разговора не заработает");
+        }
     }
 
     if (xTaskCreate(mic_task, "mic", 4096, NULL, 6, NULL) != pdPASS) {

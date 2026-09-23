@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import json
 import logging
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
@@ -21,10 +22,35 @@ from app.session import Session
 from app.stt import SpeechToText
 from app.tts import TextToSpeech
 
+# HDD на плате, не microSD (см. CLAUDE.md) — место не экономим: 20 МБ на
+# файл, 10 файлов про запас на случай зацикливания вроде «звук ровный: N
+# кадров» каждые 5 с часами подряд, а не обычный объём разговоров.
+_LOG_MAX_BYTES = 20 * 1024 * 1024
+_LOG_BACKUP_COUNT = 10
+
+# docker logs живёт только с текущим контейнером — каждый --force-recreate
+# (а их за день активной доработки бывает несколько) стирает историю
+# целиком. Файл в settings.log_dir лежит в уже смонтированном data/ и
+# переживает пересоздание — то же самое, чем уже спасена память разговоров.
+_log_handlers: list[logging.Handler] = [logging.StreamHandler()]
+try:
+    settings.log_dir.mkdir(parents=True, exist_ok=True)
+    _log_handlers.append(RotatingFileHandler(
+        settings.log_dir / "happy.log",
+        maxBytes=_LOG_MAX_BYTES, backupCount=_LOG_BACKUP_COUNT, encoding="utf-8",
+    ))
+except OSError:
+    pass  # нет доступа к диску — работаем хотя бы через docker logs
+
 logging.basicConfig(
-    level=logging.INFO,
+    level=settings.log_level.upper(),
     format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
     datefmt="%H:%M:%S",
+    handlers=_log_handlers,
+    # Без force=True basicConfig молча ничего не делает, если у корневого
+    # логгера уже есть обработчик — а он уже есть, например, у pytest
+    # (плагин перехвата логов вешает свой ДО импорта этого модуля).
+    force=True,
 )
 log = logging.getLogger("happy")
 

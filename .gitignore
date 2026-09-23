@@ -6,6 +6,9 @@ server/models/*
 !server/models/.gitkeep
 server/music/*
 !server/music/.gitkeep
+# Память разговоров, списки, лог и т.п. — на плате это отдельная папка на
+# HDD (см. CLAUDE.md), сюда попадает только если что-то запустить локально.
+server/data/
 
 # Python
 __pycache__/

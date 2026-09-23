@@ -59,6 +59,15 @@ log = logging.getLogger("happy")
 # свои ошибки мы логируем сами и без секретов.
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
+# LOG_LEVEL=DEBUG нужен ради двух наших log.debug(...), а не ради того, чтобы
+# библиотеки печатали сырые пакеты: websockets на DEBUG дампит КАЖДОЕ TEXT-
+# сообщение целиком — включая session.update с полным текстом инструкций
+# (там сводка памяти) и служебные cookie от api.openai.com. За секунды это
+# десятки КБ и чужие данные в файле лога. Держим их на INFO независимо от
+# общего уровня — тот же приём, что уже применён к httpx выше.
+for _noisy_logger in ("websockets", "websockets.client", "openai", "asyncio"):
+    logging.getLogger(_noisy_logger).setLevel(logging.INFO)
+
 if settings.stt_provider == "openai":
     stt = CloudSpeechToText(
         api_key=settings.openai_api_key,

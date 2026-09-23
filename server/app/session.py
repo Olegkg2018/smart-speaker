@@ -782,6 +782,12 @@ class Session:
     async def _set_state(self, state: State) -> None:
         if state == self._state:
             return
+        # Раньше смена состояния нигде не писалась в текстовый лог — только
+        # уходила устройству по WS. Разбор ложных срабатываний и «завис на
+        # PLAYING/LISTENING» упирался в то, что светодиод/экран уже не
+        # восстановить постфактум, а лог молчал. Теперь секунда и предыдущее
+        # состояние видны напрямую.
+        log.info("состояние: %s → %s", self._state.value, state.value)
         self._state = state
         if state in (State.LISTENING, State.IDLE):
             # Новый заход — старая реплика на экране только путает.

@@ -256,7 +256,7 @@ class RealtimeVoice:
                                 # текст оттуда всё равно раньше протекал в
                                 # сводку (см. «Ольга Билан» в CLAUDE.md).
                                 "transcription": {
-                                    "model": "whisper-1",
+                                    "model": self._settings.realtime_transcribe_model,
                                     "language": self._settings.whisper_language,
                                 },
                             },

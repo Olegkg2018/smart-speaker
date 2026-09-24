@@ -464,6 +464,7 @@ def _voice_for_connect_tests():
         realtime_context_tokens=4000,
         openai_voice="marin",
         whisper_language="ru",
+        realtime_transcribe_model="gpt-4o-transcribe",
         notes_dir=Path("/nonexistent-notes-dir-for-tests"),
     )
     return voice

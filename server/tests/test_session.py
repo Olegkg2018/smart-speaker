@@ -249,6 +249,72 @@ async def test_satellite_hello_gets_current_volume():
     assert volume_msg["value"] == 0.42
 
 
+def _reconnect_session(state: State, previous_device: str):
+    """Сессия, уже поднятая раньше: в неё садится переподключившаяся колонка."""
+    session = Session.__new__(Session)
+    session._settings = types.SimpleNamespace(
+        mic_sample_rate=16_000, frame_samples_mic=320, followup_enabled=False,
+        out_sample_rate=24_000, frame_samples_out=480,
+    )
+    session._mixer = types.SimpleNamespace(volume=0.5, is_playing=False)
+    session._state = state
+    session._state_watchdog = None
+    session._followup_watchdog = None
+    session._in_followup = False
+    session._recording = True
+    session._screen_text = ""
+    session._device = previous_device
+    session._voice_ready = True
+    session._voice_failed = False
+    session._voice = _FakeVoice()
+    ws = _FakeWS()
+    peer = Peer(ws, device="kitchen", role=ROLE_SPEAKER, has_screen=True)
+    session._peers = types.SimpleNamespace(all=lambda: [peer], release_active=lambda: None)
+    session.redraws = 0
+
+    async def _redraw():
+        session.redraws += 1
+
+    session._redraw = _redraw
+    return session, peer, ws
+
+
+async def test_speaker_reconnect_redraws_screen():
+    """Экран SSD1306 рисует сервер. Колонка после перезагрузки садилась в
+    живую сессию и оставалась с пустым экраном вместо «Готова»."""
+    session, peer, ws = _reconnect_session(State.IDLE, previous_device="kitchen")
+
+    await session._on_hello(peer, {"codec": "pcm"})
+
+    assert session.redraws >= 1
+    assert {"t": "state", "value": "idle"} in ws.sent_json
+
+
+async def test_speaker_reconnect_mid_turn_aborts_the_stale_turn():
+    """Перезагрузка посреди реплики оставляла сессию в THINKING — колонка
+    показывала «Думаю» до сторожа через 45 с."""
+    session, peer, ws = _reconnect_session(State.THINKING, previous_device="kitchen")
+
+    await session._on_hello(peer, {"codec": "pcm"})
+
+    assert session._state == State.IDLE
+    assert session._voice.barge_in_called
+    assert session._recording is False
+    assert ws.sent_json[-1] == {"t": "state", "value": "idle"}
+
+
+async def test_other_speaker_joining_does_not_abort_a_live_turn():
+    """Вторая колонка в комнате — не повод обрывать чужой разговор."""
+    session, peer, ws = _reconnect_session(State.THINKING, previous_device="bedroom")
+
+    await session._on_hello(peer, {"codec": "pcm"})
+
+    assert session._state == State.THINKING
+    assert not session._voice.barge_in_called
+    if session._state_watchdog is not None:
+        session._state_watchdog.cancel()
+
+
 # ---------- продолжение разговора без нового активационного слова ----------
 
 

@@ -57,7 +57,9 @@ log = logging.getLogger("happy")
 # httpx печатает полный URL каждого запроса, а в адресе Telegram лежит токен
 # бота — он оказывался в логах открытым текстом. Нам эти строки не нужны:
 # свои ошибки мы логируем сами и без секретов.
-logging.getLogger("httpx").setLevel(logging.WARNING)
+# httpx2 — копия httpx внутри нового SDK OpenAI, пишет те же URL.
+for _url_logger in ("httpx", "httpx2"):
+    logging.getLogger(_url_logger).setLevel(logging.WARNING)
 
 # LOG_LEVEL=DEBUG нужен ради двух наших log.debug(...), а не ради того, чтобы
 # библиотеки печатали сырые пакеты: websockets на DEBUG дампит КАЖДОЕ TEXT-
@@ -65,7 +67,10 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 # (там сводка памяти) и служебные cookie от api.openai.com. За секунды это
 # десятки КБ и чужие данные в файле лога. Держим их на INFO независимо от
 # общего уровня — тот же приём, что уже применён к httpx выше.
-for _noisy_logger in ("websockets", "websockets.client", "openai", "asyncio"):
+# httpcore/httpcore2 на DEBUG расписывают каждый TCP/TLS-шаг каждого запроса.
+for _noisy_logger in (
+    "websockets", "websockets.client", "openai", "asyncio", "httpcore", "httpcore2",
+):
     logging.getLogger(_noisy_logger).setLevel(logging.INFO)
 
 if settings.stt_provider == "openai":

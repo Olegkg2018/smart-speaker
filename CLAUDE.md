@@ -596,7 +596,7 @@ ESP-SR идёт с набором готовых предобученных мо
 ## Тесты
 
 ```bash
-cd server && python3 -m pytest    # 285 тестов
+cd server && python3 -m pytest    # 288 тестов
 ```
 
 Запускать именно из `server/`: в корне не подхватывается `asyncio_mode`

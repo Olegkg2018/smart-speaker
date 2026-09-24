@@ -390,6 +390,10 @@ class Session:
                 await peer.ws.send_json(volume_msg(self._mixer.volume))
             return
 
+        # Та же колонка снова — значит, она перезагрузилась, а старый её
+        # сокет вытеснен как призрак (PeerSet.add): незаконченная реплика
+        # осталась без адресата и микрофона.
+        same_speaker_again = self._device == peer.device
         self._device = peer.device
         self._client_has_screen = peer.has_screen
         self._mic_codec = peer.codec
@@ -405,10 +409,24 @@ class Session:
         with contextlib.suppress(Exception):
             await peer.ws.send_json(volume_msg(self._mixer.volume))
         if self._voice_ready or self._voice_failed:
-            # Сессия уже поднята другим устройством — второй раз бэкенд
-            # не заводим, только показываем текущее состояние.
+            # Сессия уже поднята — второй раз бэкенд не заводим, только
+            # показываем текущее состояние.
+            #
+            # Колонка, перезагрузившаяся посреди реплики, садится в сессию,
+            # застрявшую в THINKING: экран показывал «Думаю» до сторожа через
+            # 45 с. Такую реплику уже некому договорить — обрываем сразу.
+            if same_speaker_again and self._state in (
+                State.LISTENING, State.THINKING, State.SPEAKING
+            ):
+                log.info("колонка переподключилась посреди реплики (%s) — обрываю её",
+                         self._state.value)
+                await self._abort_turn()
             with contextlib.suppress(Exception):
                 await peer.ws.send_json(state_msg(self._state))
+            # SSD1306 рисует только то, что пришлёт сервер, а прошивка при
+            # подключении экран гасит. Без перерисовки колонка после
+            # перезагрузки оставалась с пустым экраном, хотя отвечала.
+            await self._redraw()
             return
         self._state = State.LISTENING  # чтобы следующий вызов точно перерисовал
         await self._set_state(State.IDLE)
@@ -815,6 +833,10 @@ class Session:
             "состояние «%s» не менялось %.0f с — похоже на зависание, возвращаюсь в IDLE",
             state.value, _STATE_WATCHDOG_S,
         )
+        await self._abort_turn()
+
+    async def _abort_turn(self) -> None:
+        """Бросает незаконченную реплику и возвращает сессию в покой."""
         self._recording = False
         self._clear_followup_watchdog()
         self._in_followup = False

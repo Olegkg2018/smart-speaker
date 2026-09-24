@@ -120,6 +120,7 @@ class Session:
             drop_audio=self._mixer.drop_speech,
             wait_drained=self._wait_speech_drained,
             turn_done=self._finish_turn,
+            end_conversation=self._set_idle,
             save_turn=self._save_turn,
         )
         self._memory: ConversationMemory | None = None

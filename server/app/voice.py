@@ -35,6 +35,9 @@ class VoiceCallbacks:
     wait_drained: Callable[[], Awaitable[None]]
     # Реплика полностью отзвучала — сессия решает, в какое состояние встать.
     turn_done: Callable[[], Awaitable[None]]
+    # Модель сама закрыла разговор (end_conversation) — в покой без окна
+    # продолжения. Зовётся вместо turn_done.
+    end_conversation: Callable[[], Awaitable[None]]
     # Реплика (своя или ассистента) целиком готова — сохранить на диск.
     save_turn: Callable[[str, str], Awaitable[None]]
 

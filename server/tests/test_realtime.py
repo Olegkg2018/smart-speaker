@@ -591,10 +591,132 @@ async def test_run_tool_drops_result_if_connection_changed_mid_dispatch(monkeypa
 
     monkeypatch.setattr(realtime_mod, "dispatch", fake_dispatch)
 
-    await voice._run_tool("call-1", "web_search", "{}")
+    await voice._run_tools([_call("call-1", "web_search")])
 
     assert old_conn.created_items == [] and old_conn.responses_created == 0
     assert new_conn.created_items == [] and new_conn.responses_created == 0
+
+
+def _call(call_id, name, arguments="{}"):
+    return types.SimpleNamespace(
+        type="function_call", call_id=call_id, name=name, arguments=arguments
+    )
+
+
+async def test_several_tools_in_one_response_get_one_response_create(monkeypatch):
+    """«Погода и жалюзи» в одном ответе: раньше каждый инструмент сам звал
+    response.create(), второй получал «already has an active response», и
+    его результат не озвучивался."""
+    voice = RealtimeVoice.__new__(RealtimeVoice)
+    voice._ctx = None
+    conn = _FakeConn()
+    voice._conn = conn
+
+    async def fake_dispatch(ctx, name, args):
+        await asyncio.sleep(0.01 if name == "get_weather" else 0)
+        return f"результат {name}"
+
+    monkeypatch.setattr(realtime_mod, "dispatch", fake_dispatch)
+
+    await voice._run_tools([_call("c1", "get_weather"), _call("c2", "read_sensors")])
+
+    assert [i["call_id"] for i in conn.created_items] == ["c1", "c2"]
+    assert [i["output"] for i in conn.created_items] == [
+        "результат get_weather", "результат read_sensors",
+    ]
+    assert conn.responses_created == 1
+
+
+class _CancelRecorder:
+    def __init__(self):
+        self.cancelled = 0
+
+    async def cancel(self):
+        self.cancelled += 1
+
+
+async def _noop_async(*args, **kwargs):
+    return None
+
+
+async def test_barge_in_cancels_only_an_active_response():
+    """Отмена на каждое «Джарвис» без идущего ответа сыпала в лог
+    «Cancellation failed: no active response found»."""
+    voice = RealtimeVoice.__new__(RealtimeVoice)
+    response = _CancelRecorder()
+    voice._conn = types.SimpleNamespace(
+        response=response,
+        input_audio_buffer=types.SimpleNamespace(clear=_noop_async),
+    )
+    voice._cb = types.SimpleNamespace(drop_audio=_noop_async)
+
+    await voice.barge_in()
+    assert response.cancelled == 0
+
+    await voice._on_event(types.SimpleNamespace(type="response.created"))
+    await voice.barge_in()
+    assert response.cancelled == 1
+    assert voice._response_active is False
+
+
+class _EndCallbacks:
+    def __init__(self):
+        self.turn_done_called = False
+        self.end_called = False
+
+    async def wait_drained(self):
+        pass
+
+    async def turn_done(self):
+        self.turn_done_called = True
+
+    async def end_conversation(self):
+        self.end_called = True
+
+
+def _voice_for_response_done():
+    voice = RealtimeVoice.__new__(RealtimeVoice)
+    voice._cost = types.SimpleNamespace(add=lambda usage: None)
+    voice._cb = _EndCallbacks()
+    voice._transcript = ""
+    voice._speaking = True
+    voice._conn = _FakeConn()
+    voice._flush_exchange = _noop_async
+    return voice
+
+
+def _done(*calls):
+    return types.SimpleNamespace(
+        type="response.done",
+        response=types.SimpleNamespace(usage=None, output=list(calls)),
+    )
+
+
+async def test_end_conversation_closes_silently_without_followup():
+    voice = _voice_for_response_done()
+
+    await voice._on_event(_done(_call("c1", "end_conversation")))
+
+    assert voice._conn.responses_created == 0, "после end_conversation говорить нечего"
+    assert voice._cb.end_called and not voice._cb.turn_done_called
+    assert voice._conn.created_items[0]["call_id"] == "c1"
+
+
+async def test_end_conversation_mixed_with_other_tools_is_ignored(monkeypatch):
+    voice = _voice_for_response_done()
+    voice._ctx = None
+    started = []
+
+    async def fake_run_tools(calls):
+        started.append([c.name for c in calls])
+
+    voice._run_tools = fake_run_tools
+
+    await voice._on_event(_done(_call("c1", "get_weather"), _call("c2", "end_conversation")))
+    await asyncio.sleep(0)
+
+    assert started == [["get_weather", "end_conversation"]]
+    assert not voice._cb.end_called
 
 
 # ---------- реанимация после исчерпания попыток ----------
@@ -696,7 +818,26 @@ class _FullCallbacks(_Callbacks):
         pass
 
 
-def _voice_ready_to_end(expert_model="gpt-5.4-mini", force=True):
+class _ItemRecorder:
+    def __init__(self, log=None):
+        self.created: list = []
+        self._log = log
+
+    async def create(self, **kwargs):
+        self.created.append(kwargs["item"])
+        if self._log is not None:
+            self._log.append("item")
+
+
+class _OrderedCommitBuffer:
+    def __init__(self, log):
+        self._log = log
+
+    async def commit(self):
+        self._log.append("commit")
+
+
+def _voice_ready_to_end(expert_model="gpt-5.4-mini"):
     voice = _idle_voice()
     voice._mic_batch = bytearray()
     voice._transcript = ""
@@ -704,11 +845,13 @@ def _voice_ready_to_end(expert_model="gpt-5.4-mini", force=True):
     voice._user_ready = asyncio.Event()
     voice._flush_mic = _noop_flush
     voice._cb = _FullCallbacks()
-    voice._settings = types.SimpleNamespace(
-        expert_model=expert_model, expert_force_on_followup=force
-    )
+    voice._settings = types.SimpleNamespace(expert_model=expert_model)
+    order: list = []
+    voice.order = order
     voice._conn = types.SimpleNamespace(
-        input_audio_buffer=_CommitBuffer(), response=_ResponseRecorder()
+        input_audio_buffer=_OrderedCommitBuffer(order),
+        response=_ResponseRecorder(),
+        conversation=types.SimpleNamespace(item=_ItemRecorder(order)),
     )
     return voice
 
@@ -717,28 +860,28 @@ async def _noop_flush():
     pass
 
 
-async def test_followup_utterance_forces_a_tool_call():
+async def test_followup_utterance_is_marked_but_nothing_is_forced():
+    """tool_choice=required на продолжении заставлял модель что-то вызвать
+    даже на обрывке эха — и она снова включала музыку. Теперь только
+    пометка перед репликой, модель вправе промолчать через end_conversation."""
     voice = _voice_ready_to_end()
     await voice.begin_utterance(followup=True)
     await voice.end_utterance()
 
-    assert voice._conn.response.created == [{"response": {"tool_choice": "required"}}]
+    assert voice._conn.response.created == [{}]
+    items = voice._conn.conversation.item.created
+    assert len(items) == 1 and items[0]["role"] == "system"
+    assert "end_conversation" in items[0]["content"][0]["text"]
+    assert voice.order == ["item", "commit"], "пометка должна идти ДО реплики"
 
 
-async def test_regular_utterance_does_not_force_anything():
+async def test_regular_utterance_has_no_followup_note():
     voice = _voice_ready_to_end()
     await voice.begin_utterance(followup=False)
     await voice.end_utterance()
 
     assert voice._conn.response.created == [{}]
-
-
-async def test_forcing_needs_an_expert_and_can_be_switched_off():
-    for kwargs in ({"expert_model": ""}, {"force": False}):
-        voice = _voice_ready_to_end(**kwargs)
-        await voice.begin_utterance(followup=True)
-        await voice.end_utterance()
-        assert voice._conn.response.created == [{}], kwargs
+    assert voice._conn.conversation.item.created == []
 
 
 async def test_followup_flag_does_not_leak_into_the_next_utterance():
@@ -748,3 +891,4 @@ async def test_followup_flag_does_not_leak_into_the_next_utterance():
     await voice.end_utterance()
 
     assert voice._conn.response.created == [{}]
+    assert voice._conn.conversation.item.created == []

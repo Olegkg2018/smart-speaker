@@ -494,15 +494,38 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
 ]
 
 
-def tool_schemas(settings) -> list[dict[str, Any]]:
+# Имя отдельной константой: его обрабатывает сам RealtimeVoice, а не dispatch.
+END_CONVERSATION = "end_conversation"
+
+# Только для Realtime: окно продолжения разговора есть лишь там, а у Claude
+# закрывать нечего.
+END_CONVERSATION_SCHEMA: dict[str, Any] = {
+    "name": END_CONVERSATION,
+    "description": (
+        "Молча закончить разговор. Вызывай ТОЛЬКО на реплике, которой "
+        "предшествовала пометка, что она услышана без активационного слова, "
+        "и только если в ней нет обращения к тебе (шум, телевизор, люди "
+        "говорят между собой, обрывок твоих же слов) или человек заканчивает "
+        "разговор («спасибо», «всё», «хватит», «понятно»). После вызова "
+        "ничего не говори."
+    ),
+    "input_schema": {"type": "object", "properties": {}, "required": []},
+}
+
+
+def tool_schemas(settings, *, conversation_control: bool = False) -> list[dict[str, Any]]:
     """Инструменты, которые показываются модели с этими настройками.
 
     ask_expert без заданной EXPERT_MODEL вызывать нечем — модели о нём знать
     не нужно: иначе она будет звать инструмент, который отвечает «не настроен».
+    end_conversation — только бэкенду, который умеет закрыть окно продолжения.
     """
-    if getattr(settings, "expert_model", ""):
-        return TOOL_SCHEMAS
-    return [t for t in TOOL_SCHEMAS if t["name"] != "ask_expert"]
+    schemas = TOOL_SCHEMAS
+    if not getattr(settings, "expert_model", ""):
+        schemas = [t for t in schemas if t["name"] != "ask_expert"]
+    if conversation_control:
+        schemas = [*schemas, END_CONVERSATION_SCHEMA]
+    return schemas
 
 
 async def dispatch(ctx: ToolContext, name: str, args: dict[str, Any]) -> str:
@@ -549,6 +572,10 @@ async def dispatch(ctx: ToolContext, name: str, args: dict[str, Any]) -> str:
                 return await alarms.list_alarms(ctx.settings.alarms_dir)
             case "cancel_alarms":
                 return await alarms.cancel_alarms(ctx.settings.alarms_dir)
+            case "end_conversation":
+                # Сюда попадает, только если модель позвала его вместе с
+                # другими инструментами — тогда разговор не закрываем.
+                return "ок"
             case "ask_expert":
                 turns, summary = ctx.recent_turns()
                 return await expert.ask_expert(

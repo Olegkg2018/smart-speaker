@@ -93,3 +93,13 @@ def test_tool_is_hidden_from_the_model_until_expert_model_is_set():
     assert "ask_expert" not in off
     assert "ask_expert" in on
     assert off == on - {"ask_expert"}
+
+
+def test_end_conversation_is_shown_only_to_realtime():
+    """Окно продолжения есть только у Realtime — Claude закрывать нечего."""
+    settings = types.SimpleNamespace(expert_model="gpt-5.4-mini")
+    claude = {t["name"] for t in tool_schemas(settings)}
+    realtime = {t["name"] for t in tool_schemas(settings, conversation_control=True)}
+
+    assert "end_conversation" not in claude
+    assert realtime == claude | {"end_conversation"}

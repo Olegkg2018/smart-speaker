@@ -31,7 +31,7 @@ from app.tools import notes as notes_tool
 from app.pricing import CostMeter
 from app.protocol import State
 from app.tools.context import ToolContext
-from app.tools.registry import dispatch, tool_schemas
+from app.tools.registry import END_CONVERSATION, dispatch, tool_schemas
 from app.voice import VoiceCallbacks
 
 log = logging.getLogger(__name__)
@@ -45,6 +45,23 @@ _REALTIME_RATE = 24_000
 # задержки до трёх секунд, из-за которых речь в колонке шла рывками.
 # Копим пятую долю секунды и отправляем разом.
 _SEND_BATCH_MS = 200
+
+# Пометка перед репликой-продолжением (без активационного слова, в окне сразу
+# после ответа). role=system — это не слова пользователя, а обстоятельство.
+_FOLLOWUP_NOTE = {
+    "type": "message",
+    "role": "system",
+    "content": [{
+        "type": "input_text",
+        "text": (
+            "Следующая реплика услышана без активационного слова, в коротком "
+            "окне сразу после твоего ответа. Если в ней нет обращения к тебе "
+            "(шум, телевизор, люди говорят между собой, обрывок твоих же слов) "
+            "или человек заканчивает разговор («спасибо», «всё», «хватит») — "
+            "вызови end_conversation и ничего не говори."
+        ),
+    }],
+}
 
 # OpenAI держит Realtime-сессию не дольше часа — объявленный лимит, не сбой
 # (см. _recv_loop и _proactive_refresh). Реактивного переподключения после
@@ -159,7 +176,7 @@ def _realtime_tools(settings) -> list[dict]:
             "description": t["description"],
             "parameters": t["input_schema"],
         }
-        for t in tool_schemas(settings)
+        for t in tool_schemas(settings, conversation_control=True)
     ]
 
 
@@ -170,6 +187,10 @@ class RealtimeVoice:
     _revive_task: asyncio.Task | None = None
     # Текущая реплика — продолжение разговора (см. end_utterance).
     _followup_turn = False
+    # Облако сейчас генерирует ответ (между response.created и response.done).
+    # Без этого barge_in слал cancel на каждое «Джарвис» и получал в лог
+    # «Cancellation failed: no active response found».
+    _response_active = False
 
     def __init__(self, settings: Settings, ctx: ToolContext, cb: VoiceCallbacks):
         self._settings = settings
@@ -178,6 +199,7 @@ class RealtimeVoice:
         self._client = AsyncOpenAI(api_key=settings.openai_api_key or None)
         self._manager = None
         self._conn = None
+        self._response_active = False
         self._recv_task: asyncio.Task | None = None
         # Аудио ответа приходит раньше, чем мы успеваем отреагировать на первый
         # байт — по этому флагу переключаем состояние ровно один раз за реплику.
@@ -302,6 +324,7 @@ class RealtimeVoice:
         manager, conn = connect_task.result()
         self._manager = manager
         self._conn = conn
+        self._response_active = False
         self._recv_task = asyncio.create_task(self._recv_loop())
         self._refresh_task = asyncio.create_task(self._proactive_refresh())
 
@@ -327,6 +350,7 @@ class RealtimeVoice:
         log.info("отложенное соединение с Realtime всё же поднялось — использую его")
         self._manager = manager
         self._conn = conn
+        self._response_active = False
         self._recv_task = asyncio.create_task(self._recv_loop())
         self._refresh_task = asyncio.create_task(self._proactive_refresh())
 
@@ -403,26 +427,23 @@ class RealtimeVoice:
         # двести миллисекунд, а там обычно конец слова.
         await self._flush_mic()
         await self._cb.set_state(State.THINKING)
+        if self._followup_turn:
+            # Модель не отличает продолжение от реплики после «Джарвис» —
+            # а на продолжении ей можно и нужно промолчать, если к ней не
+            # обращались (end_conversation). Раньше здесь был
+            # tool_choice="required": модель ОБЯЗАНА была что-то вызвать даже
+            # на обрывке эха и снова включала музыку — цикл ложных
+            # срабатываний (см. CLAUDE.md).
+            await self._conn.conversation.item.create(item=_FOLLOWUP_NOTE)
         await self._conn.input_audio_buffer.commit()
-        if (
-            self._followup_turn
-            and getattr(self._settings, "expert_model", "")
-            and getattr(self._settings, "expert_force_on_followup", False)
-        ):
-            # Продолжение разговора: mini обязана вызвать какой-нибудь
-            # инструмент — конкретный, если он подходит, иначе ask_expert.
-            # Именно «required», а не имя ask_expert: иначе «поставь таймер»
-            # на продолжении ушло бы к эксперту, который таймер не поставит.
-            log.info("продолжение разговора — вызов инструмента обязателен")
-            await self._conn.response.create(response={"tool_choice": "required"})
-        else:
-            await self._conn.response.create()
+        await self._conn.response.create()
 
     async def barge_in(self) -> None:
         if self._conn is not None:
-            # Отменять можно и когда отвечать нечему — сервер просто откажет.
-            with contextlib.suppress(Exception):
-                await self._conn.response.cancel()
+            if self._response_active:
+                self._response_active = False
+                with contextlib.suppress(Exception):
+                    await self._conn.response.cancel()
             with contextlib.suppress(Exception):
                 await self._conn.input_audio_buffer.clear()
         self._speaking = False
@@ -490,6 +511,7 @@ class RealtimeVoice:
         # не пытались писать в закрытый сокет — независимо от того, было
         # это исключение или тихое штатное закрытие выше.
         self._conn = None
+        self._response_active = False
         self._speaking = False
         with contextlib.suppress(Exception):
             await self._cb.wait_drained()
@@ -586,6 +608,7 @@ class RealtimeVoice:
         old_task, self._recv_task = self._recv_task, None
         old_manager, self._manager = self._manager, None
         self._conn = None
+        self._response_active = False
         # Тот же урок, что и у start() (см. _CONNECT_TIMEOUT_S): закрытие
         # старого соединения — тоже сетевой вызов и тоже может зависнуть.
         # Живой случай: именно это молчаливо повисло на минуты. Важно: тут
@@ -633,7 +656,10 @@ class RealtimeVoice:
             await self._cb.show_text(event.transcript)
             self._pending_user = event.transcript
             self._user_ready.set()
+        elif etype == "response.created":
+            self._response_active = True
         elif etype == "response.done":
+            self._response_active = False
             self._cost.add(getattr(event.response, "usage", None))
             # Ответ, целиком состоящий из вызова инструмента, не значит, что
             # реплика закончилась — следом придёт ещё один response с озвучкой
@@ -643,38 +669,64 @@ class RealtimeVoice:
                 for item in event.response.output
                 if getattr(item, "type", None) == "function_call"
             ]
-            if calls:
-                for item in calls:
-                    asyncio.create_task(self._run_tool(item.call_id, item.name, item.arguments))
+            if len(calls) == 1 and calls[0].name == END_CONVERSATION:
+                # Модель решила, что к ней не обращались (или с ней
+                # попрощались) — молча закрываем разговор: без озвучки
+                # результата и без нового окна продолжения.
+                log.info("модель закрыла разговор (end_conversation)")
+                with contextlib.suppress(Exception):
+                    await self._conn.conversation.item.create(item={
+                        "type": "function_call_output",
+                        "call_id": calls[0].call_id,
+                        "output": "ок",
+                    })
+                await self._finish_response(self._cb.end_conversation)
                 return
-            self._speaking = False
-            self._pending_assistant = self._transcript or None
-            self._transcript = ""
-            # Запись в память не должна задерживать возврат в IDLE: она
-            # ждёт расшифровку вопроса, а колонка ждать не обязана.
-            asyncio.create_task(self._flush_exchange())
-            await self._cb.wait_drained()
-            await self._cb.turn_done()
+            if calls:
+                asyncio.create_task(self._run_tools(calls))
+                return
+            await self._finish_response(self._cb.turn_done)
         elif etype == "error":
             log.warning("realtime сообщил об ошибке: %s", event.error)
 
-    async def _run_tool(self, call_id: str, name: str, raw_args: str) -> None:
-        log.info("инструмент %s(%s)", name, raw_args)
+    async def _finish_response(self, done) -> None:
+        self._speaking = False
+        self._pending_assistant = self._transcript or None
+        self._transcript = ""
+        # Запись в память не должна задерживать возврат в IDLE: она
+        # ждёт расшифровку вопроса, а колонка ждать не обязана.
+        asyncio.create_task(self._flush_exchange())
+        await self._cb.wait_drained()
+        await done()
+
+    async def _run_tools(self, calls: list) -> None:
+        """Выполняет все вызовы одного ответа и просит озвучку ОДИН раз.
+
+        Раньше каждый вызов сам звал response.create() по готовности: на
+        «погода и жалюзи» второй получал «already has an active response»,
+        а его результат так и не озвучивался.
+        """
         # Запоминаем ИМЕННО этот объект соединения: пока dispatch() ждёт
         # (например, долгий web_search), сессия может успеть порваться и
         # переподключиться. self._conn is None этого не ловит — новое
         # соединение тоже не None, а call_id принадлежит старому и в новой
         # сессии неизвестен.
         conn = self._conn
+        outputs = await asyncio.gather(*(self._dispatch_one(item) for item in calls))
+        if conn is None or self._conn is not conn:
+            names = ", ".join(item.name for item in calls)
+            log.warning("соединение сменилось во время %s — результат инструмента потерян", names)
+            return
+        for item, output in zip(calls, outputs):
+            await conn.conversation.item.create(
+                item={"type": "function_call_output", "call_id": item.call_id, "output": output}
+            )
+        await conn.response.create()
+
+    async def _dispatch_one(self, item) -> str:
+        log.info("инструмент %s(%s)", item.name, item.arguments)
         try:
-            args = json.loads(raw_args) if raw_args else {}
+            args = json.loads(item.arguments) if item.arguments else {}
         except json.JSONDecodeError:
             args = {}
-        output = await dispatch(self._ctx, name, args)
-        if conn is None or self._conn is not conn:
-            log.warning("соединение сменилось во время %s — результат инструмента потерян", name)
-            return
-        await conn.conversation.item.create(
-            item={"type": "function_call_output", "call_id": call_id, "output": output}
-        )
-        await conn.response.create()
+        return await dispatch(self._ctx, item.name, args)

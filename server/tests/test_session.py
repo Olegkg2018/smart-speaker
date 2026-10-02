@@ -257,6 +257,7 @@ def _reconnect_session(state: State, previous_device: str):
         out_sample_rate=24_000, frame_samples_out=480,
     )
     session._mixer = types.SimpleNamespace(volume=0.5, is_playing=False)
+    session._ctx = types.SimpleNamespace(queue=[], queue_name=None)
     session._state = state
     session._state_watchdog = None
     session._followup_watchdog = None
@@ -636,3 +637,72 @@ async def test_regular_recording_tells_the_backend_it_is_not_a_followup():
 
     assert session._voice.begin_followup is False
     assert states == [State.LISTENING]
+
+
+class _FakeMusic:
+    def __init__(self):
+        self.closed = False
+
+    async def read(self, n_samples):
+        return None
+
+    async def close(self):
+        self.closed = True
+
+
+def _music_reconnect_session(state: State, with_music: bool) -> tuple[Session, _FakeMusic]:
+    """Сессия, в которой колонка «kitchen» уже была, а теперь подключается снова."""
+    from app.audio.mixer import AudioMixer
+    from app.tools.context import ToolContext
+
+    music = _FakeMusic()
+    session = Session.__new__(Session)
+    session._settings = types.SimpleNamespace(
+        mic_sample_rate=16_000, frame_samples_mic=320, frame_samples_out=960,
+        out_sample_rate=48_000, followup_enabled=False,
+    )
+    session._mixer = AudioMixer(frame_samples=960, frame_ms=20)
+    session._mixer._music = music if with_music else None
+    session._ctx = ToolContext(settings=session._settings, mixer=session._mixer, speak=None)
+    session._ctx.queue = ["a", "b"] if with_music else []
+    session._ctx.queue_name = "плейлист" if with_music else None
+    session._peers = PeerSet()
+    session._voice = _FakeVoice()
+    session._voice_ready = True
+    session._voice_failed = False
+    session._device = "kitchen"
+    session._client_has_screen = False
+    session._screen = None
+    session._screen_text = ""
+    session._state = state
+    session._state_watchdog = None
+    session._recording = False
+    session._in_followup = False
+    session._followup_watchdog = None
+    return session, music
+
+
+async def test_speaker_reconnect_during_music_resets_playback():
+    """Колонку обесточили во время музыки: вернувшись, она не должна
+    унаследовать «играет» от старой сессии (фиолетовый светодиод, нет «Готова»)."""
+    session, music = _music_reconnect_session(State.PLAYING, with_music=True)
+    ws = _FakeWS()
+    peer = Peer(ws, device="kitchen", role=ROLE_SPEAKER, has_screen=False)
+
+    await session._on_hello(peer, {"device": "kitchen"})
+
+    assert music.closed
+    assert session._ctx.queue == []
+    assert session._state == State.IDLE
+    assert ws.sent_json[-1] == {"t": "state", "value": "idle"}
+
+
+async def test_other_device_joining_does_not_stop_music():
+    """Другое устройство (не та же колонка) музыку не трогает."""
+    session, music = _music_reconnect_session(State.PLAYING, with_music=True)
+    peer = Peer(_FakeWS(), device="bedroom", role=ROLE_SPEAKER, has_screen=False)
+
+    await session._on_hello(peer, {"device": "bedroom"})
+
+    assert not music.closed
+    assert session._state == State.PLAYING

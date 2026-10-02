@@ -422,6 +422,16 @@ class Session:
                 log.info("колонка переподключилась посреди реплики (%s) — обрываю её",
                          self._state.value)
                 await self._abort_turn()
+            # Обесточенная колонка вернулась с чистой памятью, а сессия на
+            # сервере помнит играющую музыку и очередь: светодиод горел
+            # «играет», хотя слушать уже некому. Перезагрузка — это конец
+            # того, что играло, поэтому сбрасываем и музыку тоже.
+            if same_speaker_again and (
+                self._state == State.PLAYING or self._mixer.is_playing or self._ctx.queue
+            ):
+                log.info("колонка переподключилась во время музыки (%s) — останавливаю её",
+                         self._state.value)
+                await self._reset_playback()
             with contextlib.suppress(Exception):
                 await peer.ws.send_json(state_msg(self._state))
             # SSD1306 рисует только то, что пришлёт сервер, а прошивка при
@@ -844,6 +854,14 @@ class Session:
         self._peers.release_active()
         with contextlib.suppress(Exception):
             await self._voice.barge_in()
+        await self._set_idle()
+
+    async def _reset_playback(self) -> None:
+        """Останавливает музыку, чистит очередь и возвращает сессию в покой."""
+        self._ctx.queue.clear()
+        self._ctx.queue_name = None
+        with contextlib.suppress(Exception):
+            await self._mixer.set_music(None)
         await self._set_idle()
 
     async def _show_source(self, peer) -> None:

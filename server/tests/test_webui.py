@@ -17,7 +17,7 @@ from app.tools import alarms as alarms_tool
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
-    for name in ("alarms_dir", "lists_dir", "notes_dir", "memory_dir"):
+    for name in ("alarms_dir", "lists_dir", "notes_dir", "memory_dir", "costs_dir"):
         d = tmp_path / name
         d.mkdir()
         monkeypatch.setattr(webui.settings, name, d)
@@ -128,3 +128,13 @@ def test_page_renders_the_conversation_itself_not_just_a_count(client):
     html = client.get("/").text
     assert "turnsHtml" in html
     assert "ROLE_LABEL" in html
+
+
+def test_costs_endpoint_reports_ledger(client):
+    from app.pricing import CostLedger
+
+    CostLedger(webui.settings.costs_dir / "costs.json").record(0.25)
+    body = client.get("/api/costs").json()
+    assert body["today_usd"] == 0.25
+    assert body["today_turns"] == 1
+    assert len(body["days"]) == 14

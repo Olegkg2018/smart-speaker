@@ -65,3 +65,42 @@ def test_unknown_model_costs_nothing_and_does_not_crash():
 def test_missing_usage_is_ignored():
     meter = CostMeter("gpt-realtime-2.1")
     assert meter.add(None) == 0.0
+
+
+def test_ledger_accumulates_per_day_and_survives_reload(tmp_path):
+    from datetime import date
+
+    from app.pricing import CostLedger
+
+    path = tmp_path / "costs.json"
+    d1, d2 = date(2026, 10, 1), date(2026, 10, 2)
+    CostLedger(path).record(0.10, today=d1)
+    CostLedger(path).record(0.05, today=d1)  # новый объект — читает с диска
+    CostLedger(path).record(0.20, today=d2)
+
+    s = CostLedger(path).summary(today=d2)
+    assert s["today_usd"] == 0.20 and s["today_turns"] == 1
+    assert abs(s["month_usd"] - 0.35) < 1e-9
+    assert [d["turns"] for d in s["days"]][-2:] == [2, 1]
+
+
+def test_ledger_survives_corrupt_file_and_ignores_zero(tmp_path):
+    from app.pricing import CostLedger
+
+    path = tmp_path / "costs.json"
+    path.write_text("{oops", encoding="utf-8")
+    ledger = CostLedger(path)
+    ledger.record(0.0)
+    assert ledger.summary()["today_usd"] == 0.0
+    ledger.record(0.1)
+    assert ledger.summary()["today_usd"] == 0.1
+
+
+def test_meter_writes_to_ledger(tmp_path):
+    from app.pricing import CostLedger
+
+    ledger = CostLedger(tmp_path / "costs.json")
+    meter = CostMeter("gpt-realtime-2.1", ledger)
+    cost = meter.add(_Usage(audio_out=1000))
+    assert cost > 0
+    assert abs(ledger.summary()["today_usd"] - cost) < 1e-6

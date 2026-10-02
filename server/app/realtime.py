@@ -28,7 +28,7 @@ from app.config import Settings
 from app import memory_summary
 from app.memory import Turn
 from app.tools import notes as notes_tool
-from app.pricing import CostMeter
+from app.pricing import CostLedger, CostMeter
 from app.protocol import State
 from app.tools.context import ToolContext
 from app.tools.registry import END_CONVERSATION, dispatch, tool_schemas
@@ -205,7 +205,10 @@ class RealtimeVoice:
         # байт — по этому флагу переключаем состояние ровно один раз за реплику.
         self._speaking = False
         self._transcript = ""
-        self._cost = CostMeter(settings.openai_realtime_model)
+        self._cost = CostMeter(
+            settings.openai_realtime_model,
+            CostLedger(settings.costs_dir / "costs.json"),
+        )
         self._mic_batch = bytearray()
         self._batch_bytes = settings.mic_sample_rate * _SEND_BATCH_MS // 1000 * 2
         self._history: list[Turn] = []

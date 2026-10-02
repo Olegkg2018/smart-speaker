@@ -20,6 +20,7 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 from app import memory_summary, webstyle
+from app.pricing import CostLedger
 from app.config import settings
 from app.tools import alarms as alarms_tool
 from app.tools import lists as lists_tool
@@ -92,6 +93,12 @@ async def delete_note(text: str) -> dict:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(kept, ensure_ascii=False), encoding="utf-8")
     return {"ok": True}
+
+
+@router.get("/api/costs")
+async def get_costs() -> dict:
+    """Расход на голосовую модель: сегодня, за месяц и по дням."""
+    return CostLedger(settings.costs_dir / "costs.json").summary()
 
 
 @router.get("/api/memory")
@@ -175,6 +182,12 @@ __NAV__
   </div>
 
   <div class="card">
+    <h2>💲 Расходы</h2>
+    <p class="hint">Голосовая модель, по токенам ответов. Считается на месте, без кабинета OpenAI.</p>
+    <div id="costs"></div>
+  </div>
+
+  <div class="card">
     <h2>🧠 Память разговоров</h2>
     <p class="hint">Если колонка отвечает невпопад — обычно сюда попал мусор от ослышки.</p>
     <div id="memory"></div>
@@ -215,8 +228,8 @@ function rows(items, render) {
 }
 
 async function load() {
-  const [alarms, lists, notes, memory] = await Promise.all(
-    ['alarms','lists','notes','memory'].map(p => fetch('/api/'+p).then(r => r.json()))
+  const [alarms, lists, notes, memory, costs] = await Promise.all(
+    ['alarms','lists','notes','memory','costs'].map(p => fetch('/api/'+p).then(r => r.json()))
   );
 
   $('alarms').innerHTML = rows(alarms, a => `<tr>
@@ -235,6 +248,14 @@ async function load() {
   $('notes').innerHTML = rows(notes, n => `<tr><td>${esc(n)}</td><td class="act">
     <button class="danger" onclick="del('/api/notes?text=${encodeURIComponent(n)}')">убрать</button>
   </td></tr>`);
+
+  const usd = (v) => '$' + v.toFixed(2);
+  $('costs').innerHTML = `<div class="device-head"><b>Сегодня ${usd(costs.today_usd)}</b>
+    <span class="badge">реплик: ${costs.today_turns}</span>
+    <span class="badge">за месяц ${usd(costs.month_usd)}</span></div>` +
+    '<table>' + costs.days.slice().reverse().filter(d => d.turns).map(d =>
+      `<tr><td>${esc(d.date)}</td><td>${usd(d.usd)}</td><td class="sub">${d.turns} реплик</td></tr>`
+    ).join('') + '</table>';
 
   $('memory').innerHTML = Object.entries(memory).map(([dev, m]) => `
     <div class="device-head"><b>${esc(dev)}</b><span class="badge">реплик: ${m.turns.length}</span></div>

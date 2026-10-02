@@ -124,6 +124,8 @@ class Settings(BaseSettings):
     # Постоянные заметки («запомни, что…»): в отличие от истории разговора
     # они не вытесняются новыми репликами и идут в инструкции каждый раз.
     notes_dir: Path = SERVER_ROOT / "data" / "notes"
+    # Расход по дням (стоимость реплик Realtime) — файл costs.json.
+    costs_dir: Path = SERVER_ROOT / "data" / "costs"
 
     # --- лог ---
     # DEBUG — на время активного тестирования, потом не забыть вернуть INFO.

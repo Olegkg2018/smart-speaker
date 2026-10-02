@@ -11,8 +11,12 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 from dataclasses import dataclass
+from datetime import date, timedelta
+from pathlib import Path
 
 log = logging.getLogger(__name__)
 
@@ -45,11 +49,73 @@ def rates_for(model: str) -> Rates | None:
     return None
 
 
+_LEDGER_KEEP_DAYS = 400
+
+
+class CostLedger:
+    """Расход по дням на диске: переживает пересоздание контейнера.
+
+    Сессия копит итог только в памяти (CostMeter), а ответ на «сколько
+    потратили» нужен за сутки и за месяц. Один файл, ключ — дата.
+    """
+
+    def __init__(self, path: Path):
+        self._path = path
+
+    def _load(self) -> dict[str, dict]:
+        try:
+            data = json.loads(self._path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def record(self, usd: float, today: date | None = None) -> None:
+        if usd <= 0:
+            return
+        today = today or date.today()
+        data = self._load()
+        day = data.get(today.isoformat()) or {}
+        data[today.isoformat()] = {
+            "usd": round(float(day.get("usd", 0.0)) + usd, 6),
+            "turns": int(day.get("turns", 0)) + 1,
+        }
+        cutoff = (today - timedelta(days=_LEDGER_KEEP_DAYS)).isoformat()
+        data = {k: v for k, v in data.items() if k >= cutoff}
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            os.replace(tmp, self._path)
+        except OSError as exc:
+            log.warning("не удалось записать учёт расходов: %s", exc)
+
+    def summary(self, today: date | None = None) -> dict:
+        """Сегодня, текущий месяц и последние 14 дней для страницы."""
+        today = today or date.today()
+        data = self._load()
+        month = today.strftime("%Y-%m")
+        month_usd = sum(float(v.get("usd", 0)) for k, v in data.items() if k.startswith(month))
+        today_row = data.get(today.isoformat()) or {}
+        days = []
+        for i in range(13, -1, -1):
+            d = (today - timedelta(days=i)).isoformat()
+            row = data.get(d) or {}
+            days.append({"date": d, "usd": float(row.get("usd", 0.0)),
+                         "turns": int(row.get("turns", 0))})
+        return {
+            "today_usd": float(today_row.get("usd", 0.0)),
+            "today_turns": int(today_row.get("turns", 0)),
+            "month_usd": round(month_usd, 6),
+            "days": days,
+        }
+
+
 class CostMeter:
     """Копит стоимость сессии и умеет показать её словами."""
 
-    def __init__(self, model: str):
+    def __init__(self, model: str, ledger: CostLedger | None = None):
         self._model = model
+        self._ledger = ledger
         self._rates = rates_for(model)
         self.total_usd = 0.0
         self.turns = 0
@@ -98,6 +164,8 @@ class CostMeter:
 
         self.total_usd += cost
         self.turns += 1
+        if self._ledger is not None:
+            self._ledger.record(cost)
         log.info(
             "реплика: %.4f $ (вход %d аудио + %d текст, кэш %d; выход %d аудио + %d текст) "
             "| всего за сессию %.4f $ за %d реплик",

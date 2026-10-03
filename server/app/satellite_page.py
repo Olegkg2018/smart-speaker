@@ -172,13 +172,22 @@ async function pumpWake() {
   try {
     while (wakeQueue.length) {
       const score = await wake.push(wakeQueue.shift());
-      if (score === null || score < WAKE_THRESHOLD) continue;
+      if (score === null) continue;
+      if (score < WAKE_THRESHOLD) {
+        // Почти услышала — показываем, чтобы порог подбирать по цифрам,
+        // а не наугад.
+        if (score > 0.1 && Date.now() >= wakeCooldownUntil) {
+          $('wake').textContent = 'Почти: ' + score.toFixed(2) + ' (порог ' + WAKE_THRESHOLD + ')';
+        }
+        continue;
+      }
       if (Date.now() < wakeCooldownUntil) continue;
       if (curState !== 'idle' && curState !== 'playing') continue;
       wakeCooldownUntil = Date.now() + 2000;
       $('wake').textContent = 'Услышала «Hey Jarvis» (' + score.toFixed(2) + ')';
       if (ws && ws.readyState === 1) {
-        ws.send(JSON.stringify({t: 'ptt', state: 'down', source: 'wake'}));
+        ws.send(JSON.stringify({t: 'ptt', state: 'down', source: 'wake',
+                                score: Math.round(score * 100) / 100}));
       }
     }
   } catch (e) {

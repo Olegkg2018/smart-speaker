@@ -659,6 +659,12 @@ class RealtimeVoice:
             await self._cb.show_text(event.transcript)
             self._pending_user = event.transcript
             self._user_ready.set()
+        elif etype == "conversation.item.input_audio_transcription.failed":
+            # Раньше это событие не обрабатывалось вовсе: с моделью
+            # расшифровки, к которой у ключа нет доступа, каждый вопрос
+            # молча терялся — в память и Telegram две недели шли одни ответы.
+            log.warning("расшифровка вопроса не удалась: %s", getattr(event, "error", event))
+            self._user_ready.set()
         elif etype == "response.created":
             self._response_active = True
         elif etype == "response.done":

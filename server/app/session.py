@@ -359,6 +359,8 @@ class Session:
                 # если вдруг придёт, просто игнорируем — конец реплики
                 # теперь определяет детектор тишины, а не отпускание.
                 if msg.get("state") == "down":
+                    if msg.get("source") == "wake":
+                        log.info("слово с «%s» (уверенность %s)", peer.device, msg.get("score", "?"))
                     if not self._recording:
                         self._ptt_peer = peer
                         await self._start_recording()

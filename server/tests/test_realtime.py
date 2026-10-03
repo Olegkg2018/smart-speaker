@@ -892,3 +892,19 @@ async def test_followup_flag_does_not_leak_into_the_next_utterance():
 
     assert voice._conn.response.created == [{}]
     assert voice._conn.conversation.item.created == []
+
+
+async def test_failed_transcription_does_not_leave_the_exchange_waiting():
+    """Ключ без доступа к модели расшифровки: событие .failed раньше не
+    обрабатывалось, и каждый вопрос молча терялся."""
+    voice = RealtimeVoice.__new__(RealtimeVoice)
+    voice._user_ready = asyncio.Event()
+    voice._pending_user = None
+
+    await voice._on_event(types.SimpleNamespace(
+        type="conversation.item.input_audio_transcription.failed",
+        error="model_not_found",
+    ))
+
+    assert voice._user_ready.is_set()
+    assert voice._pending_user is None

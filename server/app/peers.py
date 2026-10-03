@@ -88,8 +88,10 @@ class Peer:
 class PeerSet:
     """Все устройства сессии и выбор того, кого слушаем."""
 
-    def __init__(self) -> None:
+    def __init__(self, priority: str = "loudest") -> None:
         self._peers: list[Peer] = []
+        # loudest — самый громкий микрофон; satellite — сателлит, если есть.
+        self._priority = priority
         # Кого слушаем сейчас. Меняется только между репликами: если
         # переключиться посреди фразы, распознавание получит склейку из
         # двух микрофонов и половину слов потеряет.
@@ -160,7 +162,11 @@ class PeerSet:
         elif len(self._peers) == 1:
             self._active = self._peers[0]
         else:
-            best = max(self._peers, key=lambda p: p.level)
+            candidates = self._peers
+            if self._priority == "satellite":
+                satellites = [p for p in self._peers if not p.has_speaker]
+                candidates = satellites or self._peers
+            best = max(candidates, key=lambda p: p.level)
             if self._active is not best:
                 log.info(
                     "слушаю «%s» (громкость %.0f против %s)",

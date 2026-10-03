@@ -750,3 +750,63 @@ async def test_state_watchdog_logs_where_the_audio_sender_is_stuck(caplog):
 
     assert "_stuck_sender" in caplog.text
     session._sender.cancel()
+
+
+def _ptt_session(recording: bool, started_ago: float = 10.0):
+    session = Session.__new__(Session)
+    session._recording = recording
+    session._listen_started = time.monotonic() - started_ago
+    calls = []
+
+    async def _start():
+        calls.append("start")
+
+    async def _stop():
+        calls.append("stop")
+
+    session._start_recording = _start
+    session._stop_recording = _stop
+    return session, calls
+
+
+def _ptt(source=None):
+    msg = {"t": "ptt", "state": "down"}
+    if source:
+        msg["source"] = source
+    import json
+    return json.dumps(msg)
+
+
+async def test_wake_word_from_satellite_starts_but_never_stops_a_recording():
+    phone = Peer(_FakeWS(), device="phone", role=ROLE_SATELLITE, has_screen=False)
+
+    session, calls = _ptt_session(recording=False)
+    await session._on_text(phone, _ptt("wake"))
+    assert calls == ["start"]
+
+    session, calls = _ptt_session(recording=True)
+    await session._on_text(phone, _ptt("wake"))
+    assert calls == [], "слово во время записи не должно её обрывать"
+
+
+async def test_second_device_hearing_the_same_word_is_not_a_stop():
+    kitchen = Peer(_FakeWS(), device="kitchen", role=ROLE_SPEAKER, has_screen=True)
+    phone = Peer(_FakeWS(), device="phone", role=ROLE_SATELLITE, has_screen=False)
+    session, calls = _ptt_session(recording=False)
+    await session._on_text(phone, _ptt("wake"))
+    session._recording = True
+    session._listen_started = time.monotonic()
+
+    await session._on_text(kitchen, _ptt())  # колонка услышала то же «Джарвис»
+
+    assert calls == ["start"]
+
+
+async def test_tap_by_the_same_device_still_stops_the_recording():
+    phone = Peer(_FakeWS(), device="phone", role=ROLE_SATELLITE, has_screen=False)
+    session, calls = _ptt_session(recording=True, started_ago=0.2)
+    session._ptt_peer = phone
+
+    await session._on_text(phone, _ptt())
+
+    assert calls == ["stop"]

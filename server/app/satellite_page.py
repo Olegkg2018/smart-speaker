@@ -18,14 +18,22 @@ from __future__ import annotations
 
 import time
 
-from fastapi import APIRouter
-from fastapi.responses import HTMLResponse
+from pathlib import Path
+
+from fastapi import APIRouter, HTTPException
+from fastapi.responses import FileResponse, HTMLResponse
 
 from app import webstyle
 from app.config import settings
 from app.tools.weather import current_conditions
 
 router = APIRouter()
+
+_STATIC = Path(__file__).resolve().parent / "static"
+# onnxruntime-web с CDN: собственная копия wasm весит ~10 МБ, а телефону
+# всё равно нужен интернет для облачного ответа. Версия закреплена — с ней
+# конвейер проверен на синтезированных фразах (app/static/wakeword.js).
+_ORT_VERSION = "1.22.0"
 
 # Кэш на весь процесс, не на сессию: у киоска локация всегда одна и та же
 # (default_city из настроек), несколько устройств могут спрашивать погоду
@@ -73,6 +81,7 @@ __BASE_CSS__
           background: var(--surface2); padding: 14px; border-radius: var(--radius-sm);
           margin-top: 18px; }
   code { color: var(--accent); word-break: break-all; }
+  .hint-line { color: var(--muted); font-size: .85rem; margin-top: 8px; }
   .err { color: var(--danger); min-height: 1.2em; margin-top: 10px; font-size: .9rem; }
 </style>
 
@@ -103,6 +112,7 @@ __NAV__
       <span class="pct" id="volPct">70%</span>
     </div>
 
+    <div id="wake" class="hint-line" hidden></div>
     <div id="err" class="err"></div>
 
     <div class="hint" id="hint" hidden>
@@ -122,13 +132,62 @@ __NAV__
 
 </div>
 
+<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@__ORT_VERSION__/dist/ort.min.js"></script>
+<script src="/wakeword/wakeword.js"></script>
 <script>
 const RATE = 16000, FRAME = 320, FRAME_MIC = 0x01;
+const WAKE_MODEL = '__WAKE_MODEL__', WAKE_THRESHOLD = __WAKE_THRESHOLD__;
 const $ = (id) => document.getElementById(id);
 const STATES = {idle: 'Готова', listening: 'Слушаю', thinking: 'Думаю',
                 speaking: 'Отвечает', playing: 'Играет'};
 
 let ws, ctx, node, stream, running = false;
+let curState = 'idle';
+
+// --- активационное слово прямо на телефоне (openWakeWord) ---
+// Звук то же, что уходит на сервер; инференс — асинхронно, вне
+// onaudioprocess: не успели — лишние кадры выбрасываем, а не копим.
+let wake = null, wakeQueue = [], wakeBusy = false, wakeCooldownUntil = 0;
+
+async function initWake() {
+  if (wake || typeof ort === 'undefined' || typeof WakeWord === 'undefined') {
+    if (!wake) $('wake').textContent = 'Слово недоступно: не загрузился onnxruntime';
+    $('wake').hidden = false;
+    return;
+  }
+  try {
+    ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@__ORT_VERSION__/dist/';
+    $('wake').textContent = 'Загружаю слово…';
+    $('wake').hidden = false;
+    wake = await WakeWord.load(ort, '/wakeword/', WAKE_MODEL);
+    $('wake').textContent = 'Скажите «Hey Jarvis»';
+  } catch (e) {
+    $('wake').textContent = 'Слово недоступно: ' + (e.message || e);
+  }
+}
+
+async function pumpWake() {
+  if (wakeBusy || !wake) return;
+  wakeBusy = true;
+  try {
+    while (wakeQueue.length) {
+      const score = await wake.push(wakeQueue.shift());
+      if (score === null || score < WAKE_THRESHOLD) continue;
+      if (Date.now() < wakeCooldownUntil) continue;
+      if (curState !== 'idle' && curState !== 'playing') continue;
+      wakeCooldownUntil = Date.now() + 2000;
+      $('wake').textContent = 'Услышала «Hey Jarvis» (' + score.toFixed(2) + ')';
+      if (ws && ws.readyState === 1) {
+        ws.send(JSON.stringify({t: 'ptt', state: 'down', source: 'wake'}));
+      }
+    }
+  } catch (e) {
+    $('wake').textContent = 'Ошибка распознавания слова: ' + (e.message || e);
+    wake = null;
+  } finally {
+    wakeBusy = false;
+  }
+}
 
 function show(err) { $('err').textContent = err || ''; }
 
@@ -207,12 +266,14 @@ async function start() {
     $('talk').hidden = false;
     $('volBox').hidden = false;
     show('');
+    initWake();
   };
 
   ws.onmessage = (ev) => {
     if (typeof ev.data !== 'string') return;   // звук и картинки нам не нужны
     let m; try { m = JSON.parse(ev.data); } catch { return; }
     if (m.t === 'state') {
+      curState = m.value;
       $('state').textContent = STATES[m.value] || m.value;
       // В покое киоск — это просто часы с погодой; статус занимает место
       // на виду только пока что-то реально происходит.
@@ -263,14 +324,23 @@ async function start() {
       const chunk = acc.splice(0, FRAME);
       const buf = new ArrayBuffer(1 + FRAME * 2);
       const view = new DataView(buf);
+      const samples = new Int16Array(FRAME);
       view.setUint8(0, FRAME_MIC);
       for (let i = 0; i < FRAME; i++) {
         const v = Math.max(-1, Math.min(1, chunk[i]));
-        view.setInt16(1 + i * 2, v * 32767, true);
+        samples[i] = v * 32767;
+        view.setInt16(1 + i * 2, samples[i], true);
         peak = Math.max(peak, Math.abs(v));
       }
       ws.send(buf);
+      if (wake) {
+        wakeQueue.push(samples);
+        // Около двух секунд запаса; больше — телефон не успевает, старое
+        // уже не нужно.
+        if (wakeQueue.length > 100) wakeQueue.splice(0, wakeQueue.length - 100);
+      }
     }
+    pumpWake();
     $('bar').style.width = Math.min(100, peak * 160) + '%';
   };
 
@@ -347,9 +417,24 @@ $('volSlider').addEventListener('input', () => {
 async def satellite() -> str:
     return (
         _PAGE.replace("__TLS_PORT__", str(settings.tls_port))
+        .replace("__ORT_VERSION__", _ORT_VERSION)
+        .replace("__WAKE_MODEL__", settings.wakeword_model)
+        .replace("__WAKE_THRESHOLD__", str(float(settings.wakeword_threshold)))
         .replace("__BASE_CSS__", webstyle.BASE_CSS)
         .replace("__NAV__", webstyle.nav("satellite"))
     )
+
+
+@router.get("/wakeword/{name}")
+async def wakeword_file(name: str) -> FileResponse:
+    """Модели слова и сам детектор — только по белому списку имён."""
+    if name == "wakeword.js":
+        return FileResponse(_STATIC / "wakeword.js", media_type="text/javascript")
+    allowed = {"melspectrogram.onnx", "embedding_model.onnx", settings.wakeword_model}
+    path = settings.wakeword_dir / name
+    if name not in allowed or not path.is_file():
+        raise HTTPException(status_code=404)
+    return FileResponse(path, media_type="application/octet-stream")
 
 
 @router.get("/api/weather")

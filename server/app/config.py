@@ -66,6 +66,17 @@ class Settings(BaseSettings):
     # «скажи слово снова». Дольше — больше случайных шумов успеет пройти
     # мимо; короче — не успеть сформулировать вопрос.
     followup_window_s: float = 3.0
+
+    # --- сателлиты ---
+    # Чей микрофон берёт реплику: loudest — самый громкий на её начало
+    # (по умолчанию), satellite — сателлит, если он подключён, даже когда
+    # колонка громче (для проверки, у телефона аппаратное эхоподавление).
+    mic_priority: str = "loudest"
+    # Активационное слово в браузере сателлита (openWakeWord, см.
+    # app/static/wakeword.js). Модели скачиваются в образ при сборке.
+    wakeword_dir: Path = SERVER_ROOT / "wakeword"
+    wakeword_model: str = "hey_jarvis_v0.1.onnx"
+    wakeword_threshold: float = 0.5
     # Во сколько раз тише эталонного уровня прошлой реплики (по сырому,
     # ДО автоусиления на плате, звуку — см. firmware/main/audio_in.c и
     # app/audio/speaker_level.py) можно говорить и всё ещё считаться тем

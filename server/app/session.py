@@ -66,6 +66,9 @@ _CATCHUP_LIMIT_S = 0.150
 # пока не пришло ручное вмешательство). Ни разу это не было настоящей долгой
 # репликой — 45 с щедро выше любого легитимного вызова инструмента.
 _STATE_WATCHDOG_S = 45.0
+# Второй ptt от ДРУГОГО устройства в первые секунды записи — это то же
+# слово, услышанное двумя микрофонами сразу, а не просьба остановиться.
+_PTT_DEDUP_S = 1.5
 
 # Запас поверх followup_window_s для резервного сторожа окна продолжения
 # разговора (_watch_followup). Основной путь закрытия окна — по-кадровый
@@ -82,6 +85,10 @@ _VOICE_RETRY_DELAYS_S = (5.0, 15.0, 30.0, 60.0)
 
 
 class Session:
+    # Кто начал текущую запись (см. _PTT_DEDUP_S). Класс-уровнем — тесты
+    # собирают сессию через __new__ без __init__.
+    _ptt_peer = None
+
     def __init__(
         self,
         settings: Settings,
@@ -92,7 +99,7 @@ class Session:
         # Устройств может быть несколько: колонка на кухне и телефон в
         # комнате — это два микрофона одного ассистента, а не два
         # ассистента. Разговор, память и ответ у них общие.
-        self._peers = PeerSet()
+        self._peers = PeerSet(settings.mic_priority)
         self._settings = settings
         # Синтез для серверных объявлений (сработавший таймер) — не зависит
         # от того, каким бэкендом ведётся сам разговор.
@@ -352,10 +359,22 @@ class Session:
                 # если вдруг придёт, просто игнорируем — конец реплики
                 # теперь определяет детектор тишины, а не отпускание.
                 if msg.get("state") == "down":
-                    if self._recording:
-                        await self._stop_recording()
-                    else:
+                    if not self._recording:
+                        self._ptt_peer = peer
                         await self._start_recording()
+                    elif msg.get("source") == "wake":
+                        # Слово, услышанное сателлитом, только начинает
+                        # реплику — остановить её может лишь тап по кнопке.
+                        log.debug("слово от «%s» во время записи — пропускаю", peer.device)
+                    elif (
+                        peer is not self._ptt_peer
+                        and time.monotonic() - self._listen_started < _PTT_DEDUP_S
+                    ):
+                        # «Джарвис» услышали и колонка, и телефон: второй
+                        # сигнал от другого устройства — не стоп, а эхо первого.
+                        log.info("двойное срабатывание от «%s» — пропускаю", peer.device)
+                    else:
+                        await self._stop_recording()
             case "volume":
                 await self._set_volume(float(msg.get("value", 0.7)))
             case "volume_step":

@@ -24,6 +24,9 @@ def test_page_renders_with_no_leftover_placeholders():
     assert "__TLS_PORT__" not in html
     assert "__BASE_CSS__" not in html
     assert "__NAV__" not in html
+    assert "__ORT_VERSION__" not in html
+    assert "__WAKE_MODEL__" not in html
+    assert "__WAKE_THRESHOLD__" not in html
 
 
 def test_page_links_back_to_management_page():
@@ -100,3 +103,21 @@ def test_weather_endpoint_reuses_cache_within_ttl(monkeypatch):
 
     assert len(calls) == 1, "второй запрос в пределах TTL не должен дёргать Open-Meteo снова"
 
+
+
+def test_wakeword_files_are_served_only_from_the_whitelist(tmp_path, monkeypatch):
+    for name in ("melspectrogram.onnx", "embedding_model.onnx", "hey_jarvis_v0.1.onnx"):
+        (tmp_path / name).write_bytes(b"onnx")
+    (tmp_path / "secret.txt").write_text("нельзя")
+    monkeypatch.setattr(satellite_page.settings, "wakeword_dir", tmp_path)
+    client = _client()
+
+    assert client.get("/wakeword/hey_jarvis_v0.1.onnx").content == b"onnx"
+    assert "class WakeWord" in client.get("/wakeword/wakeword.js").text
+    assert client.get("/wakeword/secret.txt").status_code == 404
+    assert client.get("/wakeword/..%2Fsecret.txt").status_code == 404
+
+
+def test_missing_wakeword_model_is_404_not_500(tmp_path, monkeypatch):
+    monkeypatch.setattr(satellite_page.settings, "wakeword_dir", tmp_path)
+    assert _client().get("/wakeword/melspectrogram.onnx").status_code == 404

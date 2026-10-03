@@ -18,6 +18,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
+# Активационное слово для сателлита (app/static/wakeword.js) — модели
+# openWakeWord отдаёт наш сервер, телефон считает их у себя. В образ, а не
+# в том: это часть кода страницы, и версия должна ехать вместе с ним.
+# Раньше COPY app — чтобы правка кода не качала модели заново. Не в /app:
+# setuptools принимает любую папку там за второй пакет и роняет pip install.
+ARG OWW_URL=https://github.com/dscripka/openWakeWord/releases/download/v0.5.1
+RUN mkdir -p /opt/wakeword && cd /opt/wakeword \
+    && for f in melspectrogram.onnx embedding_model.onnx hey_jarvis_v0.1.onnx; do \
+         python -c "import sys, urllib.request; urllib.request.urlretrieve(sys.argv[1], sys.argv[2])" \
+           "$OWW_URL/$f" "$f"; done \
+    && echo "ba2b0e0f8b7b875369a2c89cb13360ff53bac436f2895cced9f479fa65eb176f  melspectrogram.onnx" > SHA256SUMS \
+    && echo "70d164290c1d095d1d4ee149bc5e00543250a7316b59f31d056cff7bd3075c1f  embedding_model.onnx" >> SHA256SUMS \
+    && echo "94a13cfe60075b132f6a472e7e462e8123ee70861bc3fb58434a73712ee0d2cb  hey_jarvis_v0.1.onnx" >> SHA256SUMS \
+    && sha256sum -c SHA256SUMS
+
 COPY pyproject.toml ./
 COPY app ./app
 
@@ -28,6 +43,7 @@ RUN --mount=type=cache,target=/root/.cache/pip pip install --editable .[opus]
 # Замер скорости на живом железе — единственное, ради чего сюда попадает
 # каталог tools; на пересборку кода он не влияет.
 COPY tools ./tools
+
 COPY docker/entrypoint.sh /usr/local/bin/happy-entrypoint
 RUN chmod +x /usr/local/bin/happy-entrypoint
 
@@ -41,6 +57,7 @@ USER happy
 # Веса whisper тянутся с Hugging Face при первом старте — пусть ложатся в том,
 # иначе каждый пересоздаваемый контейнер качает их заново.
 ENV HF_HOME=/app/models/hf \
+    WAKEWORD_DIR=/opt/wakeword \
     PYTHONUNBUFFERED=1
 
 EXPOSE 8080

@@ -222,3 +222,25 @@ def test_keep_active_with_removed_device_clears_selection():
     peers.remove(kitchen)
     assert peers.keep_active(kitchen) is None
     assert peers.active is None
+
+
+def test_satellite_priority_prefers_the_phone_even_if_the_speaker_is_louder():
+    peers = PeerSet("satellite")
+    kitchen, phone = _peer("kitchen"), _peer("phone", ROLE_SATELLITE)
+    peers.add(kitchen)
+    peers.add(phone)
+    kitchen.note_audio(_pcm(5000))
+    phone.note_audio(_pcm(100))
+
+    assert peers.choose_active() is phone
+
+
+def test_satellite_priority_falls_back_to_the_speaker_without_satellites():
+    peers = PeerSet("satellite")
+    kitchen, bedroom = _peer("kitchen"), _peer("bedroom")
+    peers.add(kitchen)
+    peers.add(bedroom)
+    kitchen.note_audio(_pcm(100))
+    bedroom.note_audio(_pcm(5000))
+
+    assert peers.choose_active() is bedroom

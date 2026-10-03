@@ -223,6 +223,9 @@ async function start() {
       const listening = m.value === 'listening';
       $('talk').textContent = listening ? '⏹ Стоп' : '🎤 Спросить';
       $('talk').classList.toggle('active', listening);
+    } else if (m.t === 'text') {
+      // Что колонка расслышала и что отвечает — тот же текст, что на её экране.
+      $('text').textContent = m.value || '';
     } else if (m.t === 'volume' && !draggingVol) {
       // Громкость может поменять и голос, и другое устройство в той же
       // комнате — не перезаписываем ползунок, пока за него держит палец.

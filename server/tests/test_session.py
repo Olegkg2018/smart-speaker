@@ -316,6 +316,30 @@ async def test_other_speaker_joining_does_not_abort_a_live_turn():
         session._state_watchdog.cancel()
 
 
+class _BinWS(_FakeWS):
+    def __init__(self):
+        super().__init__()
+        self.sent_bytes = []
+
+    async def send_bytes(self, data):
+        self.sent_bytes.append(data)
+
+
+async def test_reply_text_goes_to_satellites_but_not_to_the_speaker():
+    """Страница /satellite показывает, что колонка расслышала и отвечает."""
+    session = Session.__new__(Session)
+    session._screen = None
+    speaker_ws, phone_ws = _BinWS(), _BinWS()
+    speaker = Peer(speaker_ws, device="kitchen", role=ROLE_SPEAKER, has_screen=True)
+    phone = Peer(phone_ws, device="phone", role=ROLE_SATELLITE, has_screen=False)
+    session._peers = types.SimpleNamespace(all=lambda: [speaker, phone])
+
+    await session._show("Сейчас десять градусов")
+
+    assert phone_ws.sent_json == [{"t": "text", "value": "Сейчас десять градусов"}]
+    assert speaker_ws.sent_json == []
+
+
 # ---------- продолжение разговора без нового активационного слова ----------
 
 
@@ -690,6 +714,7 @@ async def test_speaker_reconnect_during_music_resets_playback():
     peer = Peer(ws, device="kitchen", role=ROLE_SPEAKER, has_screen=False)
 
     await session._on_hello(peer, {"device": "kitchen"})
+    await asyncio.sleep(0)  # старый трек закрывается в фоне, не в кадре
 
     assert music.closed
     assert session._ctx.queue == []
@@ -706,3 +731,22 @@ async def test_other_device_joining_does_not_stop_music():
 
     assert not music.closed
     assert session._state == State.PLAYING
+
+
+async def test_state_watchdog_logs_where_the_audio_sender_is_stuck(caplog):
+    """Без звука, но с текстом: следующий раз видно, на каком await встал
+    отправщик, а не только что «speaking не менялся 45 с»."""
+    session = Session.__new__(Session)
+    stuck = asyncio.Event()
+
+    async def _stuck_sender():
+        await stuck.wait()
+
+    session._sender = asyncio.create_task(_stuck_sender())
+    await asyncio.sleep(0)
+
+    with caplog.at_level("WARNING"):
+        session._log_sender_health()
+
+    assert "_stuck_sender" in caplog.text
+    session._sender.cancel()

@@ -93,3 +93,20 @@ async def test_close_stops_background_reader():
 
     await src.close()
     assert src._filler is None, "фоновое чтение пережило закрытие источника"
+
+
+async def test_close_does_not_hang_when_stdout_is_no_longer_read():
+    """close() обязан вернуться и для процесса, который пишет без конца, а
+    мы его больше не читаем. Голый proc.wait() в таком положении виснет
+    (asyncio ждёт EOF на пайпе, чтение которого стоит на паузе) — close()
+    закрывает нашу сторону пайпов сама. Настоящий процесс: `yes`."""
+    source = FfmpegSource("/dev/null", 48_000, title="тест")
+    source._proc = await asyncio.create_subprocess_exec(
+        "yes", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
+    assert await source.read(FRAME) is not None  # запустили fill_loop
+    await asyncio.sleep(0.3)  # буфер очереди и пайпа забились
+
+    await asyncio.wait_for(source.close(), timeout=5)
+
+    assert source._proc is None

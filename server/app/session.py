@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import io
 import json
 import logging
 import time
@@ -778,10 +779,18 @@ class Session:
                 worst_late = max(worst_late, late)
 
             mix_started = time.monotonic()
-            pcm = await self._mixer.next_frame()
-            packet = self._spk_codec.encode(pcm)
-            send_started = time.monotonic()
-            await self._send_bytes_to(self._peers.speakers(), pack_audio(FRAME_SPEAKER, packet))
+            try:
+                pcm = await self._mixer.next_frame()
+                packet = self._spk_codec.encode(pcm)
+                send_started = time.monotonic()
+                await self._send_bytes_to(
+                    self._peers.speakers(), pack_audio(FRAME_SPEAKER, packet)
+                )
+            except Exception:
+                # Один битый кадр не должен гасить звук сессии навсегда:
+                # исключение молча убило бы задачу (её никто не ждёт).
+                log.exception("кадр звука не собрался — пропускаю")
+                continue
             now_after = time.monotonic()
             mix_ms = (send_started - mix_started) * 1000
             send_ms = (now_after - send_started) * 1000
@@ -844,7 +853,25 @@ class Session:
             "состояние «%s» не менялось %.0f с — похоже на зависание, возвращаюсь в IDLE",
             state.value, _STATE_WATCHDOG_S,
         )
+        self._log_sender_health()
         await self._abort_turn()
+
+    def _log_sender_health(self) -> None:
+        """Где стоит отправщик звука — чтобы следующее «нет звука» не гадать.
+
+        Однажды он встал на смене трека, и колонка часами отвечала текстом
+        без звука; на каком await — восстановить постфактум было нечем.
+        """
+        sender = getattr(self, "_sender", None)
+        if sender is None:
+            return
+        if sender.done():
+            exc = None if sender.cancelled() else sender.exception()
+            log.error("отправщик звука не работает (завершился: %r)", exc)
+            return
+        buf = io.StringIO()
+        sender.print_stack(file=buf)
+        log.warning("отправщик звука сейчас ждёт здесь:\n%s", buf.getvalue())
 
     async def _abort_turn(self) -> None:
         """Бросает незаконченную реплику и возвращает сессию в покой."""
@@ -876,6 +903,12 @@ class Session:
 
     async def _show(self, text: str) -> None:
         self._screen_text = text
+        # Сателлитам — текстом: экрана-битмапа у них нет, а страница /satellite
+        # показывает реплику в своём блоке. Колонке это не шлём: SSD1306
+        # рисует сервер (_redraw), а кусочки расшифровки идут часто.
+        satellites = [p for p in self._peers.all() if not p.has_speaker]
+        if satellites:
+            await self._send_json_to(satellites, {"t": "text", "value": text})
         await self._redraw()
 
     async def _redraw(self) -> None:

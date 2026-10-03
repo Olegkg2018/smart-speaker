@@ -9,6 +9,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import logging
 from typing import Protocol
 
 import numpy as np
@@ -16,6 +18,25 @@ import numpy as np
 # За сколько миллисекунд громкость музыки доезжает до нового уровня.
 # Мгновенное переключение даёт слышимый щелчок.
 _RAMP_MS = 150
+
+log = logging.getLogger(__name__)
+
+
+async def _close_quietly(source: "AudioSource") -> None:
+    with contextlib.suppress(Exception):
+        await source.close()
+
+
+def _close_in_background(source: "AudioSource") -> None:
+    """Старый трек закрываем, не дожидаясь.
+
+    Смена трека идёт прямо из next_frame(), то есть внутри тактового цикла
+    отправки звука. Закрытие — это остановка ffmpeg/yt-dlp, и однажды оно
+    повисло навсегда (proc.wait() ждёт EOF пайпа, который уже никто не
+    читает): цикл встал, колонка часами «отвечала» без звука. Что бы ни
+    случилось при закрытии, кадр ждать этого не должен.
+    """
+    asyncio.create_task(_close_quietly(source))
 
 
 class AudioSource(Protocol):
@@ -85,7 +106,7 @@ class AudioMixer:
         old, self._music = self._music, source
         self._music_paused = False
         if old is not None:
-            await old.close()
+            _close_in_background(old)
 
     async def set_music_after_speech(self, source: AudioSource) -> None:
         """Включить музыку, когда ассистент договорит.
@@ -99,7 +120,7 @@ class AudioMixer:
             return
         old, self._pending_music = self._pending_music, source
         if old is not None:
-            await old.close()
+            _close_in_background(old)
 
     async def _promote_pending_music(self) -> None:
         if self._pending_music is None or self.is_speaking:

@@ -1,3 +1,5 @@
+import asyncio
+
 import numpy as np
 import pytest
 
@@ -163,3 +165,20 @@ async def test_clipping_is_bounded():
     # Сумма превышает диапазон int16 — важно, что она обрезана, а не перевернулась.
     assert samples.max() > 0
     assert samples.max() <= 32767
+
+
+class _HangingCloseSource(ToneSource):
+    async def close(self) -> None:
+        await asyncio.Event().wait()  # закрытие, которое не вернётся никогда
+
+
+async def test_track_switch_does_not_wait_for_old_track_to_close():
+    """Смена трека идёт из next_frame(), внутри тактового цикла. Зависшее
+    закрытие старого трека однажды остановило звук сессии насовсем."""
+    mixer = make_mixer()
+    await mixer.set_music(_HangingCloseSource())
+
+    await asyncio.wait_for(mixer.set_music(ToneSource(level=5_000)), timeout=1)
+    frame = await asyncio.wait_for(mixer.next_frame(), timeout=1)
+
+    assert np.frombuffer(frame, dtype=np.int16)[0] == 5_000

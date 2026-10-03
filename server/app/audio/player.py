@@ -201,14 +201,23 @@ class FfmpegSource:
                 await self._filler
             self._filler = None
         for proc in (self._proc, self._ytdlp_proc):
-            if proc is None or proc.returncode is not None:
+            if proc is None:
                 continue
-            proc.terminate()
-            try:
+            if proc.returncode is None:
+                with contextlib.suppress(ProcessLookupError):
+                    proc.kill()
+            # Без этого proc.wait() висит вечно, даже когда процесс уже убит:
+            # asyncio отпускает wait() только после EOF на всех пайпах, а
+            # stdout мы читать перестали (fill_loop отменён) — буфер полон,
+            # чтение на паузе, EOF не наступает никогда. Проверено на 3.12:
+            # именно так колонка однажды осталась без звука до перезапуска.
+            # Закрываем нашу сторону пайпов сами — ждать от них нечего.
+            transport = getattr(proc, "_transport", None)
+            if transport is not None:
+                with contextlib.suppress(Exception):
+                    transport.close()
+            with contextlib.suppress(Exception):
                 await asyncio.wait_for(proc.wait(), timeout=2)
-            except TimeoutError:
-                proc.kill()
-                await proc.wait()
         self._proc = None
         self._ytdlp_proc = None
 

@@ -674,8 +674,9 @@ class _EndCallbacks:
         self.end_called = True
 
 
-def _voice_for_response_done():
+def _voice_for_response_done(followup=True):
     voice = RealtimeVoice.__new__(RealtimeVoice)
+    voice._followup_turn = followup
     voice._cost = types.SimpleNamespace(add=lambda usage: None)
     voice._cb = _EndCallbacks()
     voice._transcript = ""
@@ -700,6 +701,46 @@ async def test_end_conversation_closes_silently_without_followup():
     assert voice._conn.responses_created == 0, "после end_conversation говорить нечего"
     assert voice._cb.end_called and not voice._cb.turn_done_called
     assert voice._conn.created_items[0]["call_id"] == "c1"
+
+
+async def test_end_conversation_on_a_regular_turn_is_refused():
+    """Живой случай: после «Джарвис, какая погода» модель молча закрыла
+    разговор. После активационного слова ответ обязателен."""
+    voice = _voice_for_response_done(followup=False)
+
+    await voice._on_event(_done(_call("c1", "end_conversation")))
+
+    assert not voice._cb.end_called
+    assert voice._conn.responses_created == 1, "модель должна ответить"
+    assert "не продолжение" in voice._conn.created_items[0]["output"]
+
+
+class _DeletingConn(_FakeConn):
+    def __init__(self):
+        super().__init__()
+        self.deleted = []
+
+        async def _delete(item_id):
+            self.deleted.append(item_id)
+
+        self.conversation.item.delete = _delete
+
+
+async def test_followup_note_lives_exactly_one_turn():
+    """Пометки продолжения копились в контексте и сбивали модель."""
+    voice = _voice_ready_to_end()
+    voice._conn.conversation.item.delete = None
+    await voice.begin_utterance(followup=True)
+    await voice.end_utterance()
+    note_id = voice._conn.conversation.item.created[0]["id"]
+
+    finished = _voice_for_response_done()
+    finished._conn = _DeletingConn()
+    finished._followup_note_id = note_id
+    await finished._on_event(_done())
+
+    assert finished._conn.deleted == [note_id]
+    assert finished._followup_note_id is None
 
 
 async def test_end_conversation_mixed_with_other_tools_is_ignored(monkeypatch):

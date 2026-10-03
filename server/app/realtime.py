@@ -48,20 +48,22 @@ _SEND_BATCH_MS = 200
 
 # Пометка перед репликой-продолжением (без активационного слова, в окне сразу
 # после ответа). role=system — это не слова пользователя, а обстоятельство.
-_FOLLOWUP_NOTE = {
-    "type": "message",
-    "role": "system",
-    "content": [{
-        "type": "input_text",
-        "text": (
-            "Следующая реплика услышана без активационного слова, в коротком "
-            "окне сразу после твоего ответа. Если в ней нет обращения к тебе "
-            "(шум, телевизор, люди говорят между собой, обрывок твоих же слов) "
-            "или человек заканчивает разговор («спасибо», «всё», «хватит») — "
-            "вызови end_conversation и ничего не говори."
-        ),
-    }],
-}
+# Живёт ровно одну реплику: после ответа удаляется (_drop_followup_note).
+# Первая версия оставалась в контексте навсегда, пометки копились, и модель
+# начала молча закрывать разговор даже на «Джарвис, какая погода».
+_FOLLOWUP_NOTE_TEXT = (
+    "Следующая реплика услышана без активационного слова, сразу после твоего "
+    "ответа. Если это вопрос или просьба — отвечай как обычно. "
+    "end_conversation вызывай, только если в ней точно нет обращения к тебе "
+    "(шум, телевизор, обрывок твоих же слов) или человек явно прощается "
+    "(«спасибо», «всё», «хватит»)."
+)
+
+# Ответ модели, если она позвала end_conversation на обычной реплике.
+_NOT_A_FOLLOWUP = (
+    "Это не продолжение: к тебе обратились по имени. Разговор не закрыт — "
+    "ответь на реплику."
+)
 
 # OpenAI держит Realtime-сессию не дольше часа — объявленный лимит, не сбой
 # (см. _recv_loop и _proactive_refresh). Реактивного переподключения после
@@ -187,6 +189,9 @@ class RealtimeVoice:
     _revive_task: asyncio.Task | None = None
     # Текущая реплика — продолжение разговора (см. end_utterance).
     _followup_turn = False
+    # Пометка продолжения в контексте модели — удаляется после ответа.
+    _followup_note_id: str | None = None
+    _followup_note_seq = 0
     # Облако сейчас генерирует ответ (между response.created и response.done).
     # Без этого barge_in слал cancel на каждое «Джарвис» и получал в лог
     # «Cancellation failed: no active response found».
@@ -437,7 +442,14 @@ class RealtimeVoice:
             # tool_choice="required": модель ОБЯЗАНА была что-то вызвать даже
             # на обрывке эха и снова включала музыку — цикл ложных
             # срабатываний (см. CLAUDE.md).
-            await self._conn.conversation.item.create(item=_FOLLOWUP_NOTE)
+            self._followup_note_seq += 1
+            self._followup_note_id = f"followup_note_{self._followup_note_seq}"
+            await self._conn.conversation.item.create(item={
+                "id": self._followup_note_id,
+                "type": "message",
+                "role": "system",
+                "content": [{"type": "input_text", "text": _FOLLOWUP_NOTE_TEXT}],
+            })
         await self._conn.input_audio_buffer.commit()
         await self._conn.response.create()
 
@@ -678,6 +690,21 @@ class RealtimeVoice:
                 for item in event.response.output
                 if getattr(item, "type", None) == "function_call"
             ]
+            if (
+                len(calls) == 1 and calls[0].name == END_CONVERSATION
+                and not self._followup_turn
+            ):
+                # Закрывать разговор можно только в окне продолжения. После
+                # «Джарвис» человек точно обращался — ответ обязателен.
+                log.warning("end_conversation на обычной реплике — прошу ответить")
+                with contextlib.suppress(Exception):
+                    await self._conn.conversation.item.create(item={
+                        "type": "function_call_output",
+                        "call_id": calls[0].call_id,
+                        "output": _NOT_A_FOLLOWUP,
+                    })
+                    await self._conn.response.create()
+                return
             if len(calls) == 1 and calls[0].name == END_CONVERSATION:
                 # Модель решила, что к ней не обращались (или с ней
                 # попрощались) — молча закрываем разговор: без озвучки
@@ -698,7 +725,14 @@ class RealtimeVoice:
         elif etype == "error":
             log.warning("realtime сообщил об ошибке: %s", event.error)
 
+    async def _drop_followup_note(self) -> None:
+        note, self._followup_note_id = self._followup_note_id, None
+        if note is not None and self._conn is not None:
+            with contextlib.suppress(Exception):
+                await self._conn.conversation.item.delete(item_id=note)
+
     async def _finish_response(self, done) -> None:
+        await self._drop_followup_note()
         self._speaking = False
         self._pending_assistant = self._transcript or None
         self._transcript = ""

@@ -645,7 +645,7 @@ async def test_regular_recording_tells_the_backend_it_is_not_a_followup():
     session = Session.__new__(Session)
     session._voice_ready = True
     session._voice_failed = False
-    session._peers = types.SimpleNamespace(choose_active=lambda: None, all=lambda: [])
+    session._peers = types.SimpleNamespace(choose_active=lambda initiator=None: None, all=lambda: [])
     session._voice = _FakeVoice()
     session._vad = _FakeVAD(heard_speech=False)
     session._mixer = types.SimpleNamespace(set_listening=lambda v: None)
@@ -758,7 +758,7 @@ def _ptt_session(recording: bool, started_ago: float = 10.0):
     session._listen_started = time.monotonic() - started_ago
     calls = []
 
-    async def _start():
+    async def _start(initiator=None):
         calls.append("start")
 
     async def _stop():

@@ -244,3 +244,28 @@ def test_satellite_priority_falls_back_to_the_speaker_without_satellites():
     bedroom.note_audio(_pcm(5000))
 
     assert peers.choose_active() is bedroom
+
+
+def test_the_device_that_heard_the_word_is_the_microphone():
+    """Колонка до активации звук не шлёт — её уровень на момент выбора 0,
+    и «самым громким» всегда оказывался телефон в другом конце комнаты."""
+    peers = PeerSet()
+    kitchen, phone = _peer("kitchen"), _peer("phone", ROLE_SATELLITE)
+    peers.add(kitchen)
+    peers.add(phone)
+    phone.note_audio(_pcm(3000))  # телефон шлёт фон всё время
+
+    assert peers.choose_active(initiator=kitchen) is kitchen
+    peers.release_active()
+    assert peers.choose_active(initiator=phone) is phone
+
+
+def test_satellite_priority_still_overrides_the_speaker_initiator():
+    """Тестовый режим MIC_PRIORITY=satellite: реплику берёт телефон, даже
+    если слово услышала колонка."""
+    peers = PeerSet("satellite")
+    kitchen, phone = _peer("kitchen"), _peer("phone", ROLE_SATELLITE)
+    peers.add(kitchen)
+    peers.add(phone)
+
+    assert peers.choose_active(initiator=kitchen) is phone

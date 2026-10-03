@@ -151,16 +151,33 @@ class PeerSet:
     def active(self) -> Peer | None:
         return self._active
 
-    def choose_active(self) -> Peer | None:
-        """Выбирает микрофон на начало реплики — самый громкий.
+    def choose_active(self, initiator: Peer | None = None) -> Peer | None:
+        """Выбирает микрофон на начало реплики.
 
         Зовётся один раз, когда сервер начинает слушать. Дальше источник
         не меняется до конца реплики.
+
+        Первым делом — устройство, которое услышало слово или на котором
+        нажали кнопку: оно ближе всех к говорящему. Сравнение громкости
+        здесь врало: колонка до активации звук не шлёт, её уровень на
+        момент выбора всегда 0, и при подключённом телефоне «самым
+        громким» всегда оказывался он — колонка слышала «Джарвис», а
+        реплику слушал телефон в другом конце комнаты. Громкость остаётся
+        для случая, когда инициатора нет (сервер сам открыл микрофон).
         """
         if not self._peers:
             self._active = None
         elif len(self._peers) == 1:
             self._active = self._peers[0]
+        elif (
+            initiator is not None
+            and initiator in self._peers
+            and not (self._priority == "satellite" and initiator.has_speaker
+                     and any(not p.has_speaker for p in self._peers))
+        ):
+            if self._active is not initiator:
+                log.info("слушаю «%s» — активировали на нём", initiator.device)
+            self._active = initiator
         else:
             candidates = self._peers
             if self._priority == "satellite":

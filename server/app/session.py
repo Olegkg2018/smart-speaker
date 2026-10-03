@@ -363,7 +363,7 @@ class Session:
                         log.info("слово с «%s» (уверенность %s)", peer.device, msg.get("score", "?"))
                     if not self._recording:
                         self._ptt_peer = peer
-                        await self._start_recording()
+                        await self._start_recording(initiator=peer)
                     elif msg.get("source") == "wake":
                         # Слово, услышанное сателлитом, только начинает
                         # реплику — остановить её может лишь тап по кнопке.
@@ -610,7 +610,7 @@ class Session:
 
     # ---------- запись и обработка ----------
 
-    async def _start_recording(self) -> None:
+    async def _start_recording(self, initiator: Peer | None = None) -> None:
         if not self._voice_ready and not self._voice_failed:
             # Связь с облаком ещё поднимается: пара секунд после включения.
             await self._announce("Секунду, ещё подключаюсь.")
@@ -621,7 +621,7 @@ class Session:
             return
         # Кого слушаем эту реплику — решаем один раз, здесь. Дальше
         # источник не меняется до её конца.
-        chosen = self._peers.choose_active()
+        chosen = self._peers.choose_active(initiator)
         if chosen is not None and len(self._peers.all()) > 1:
             await self._show_source(chosen)
         await self._voice.begin_utterance(followup=False)
